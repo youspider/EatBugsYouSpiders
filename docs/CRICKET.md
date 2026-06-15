@@ -15,6 +15,10 @@ stem and plays them — building a living, non-repeating version of the music.
 
 The 4 stems play simultaneously but independently. Each has its own slice selection loop.
 
+## What EBYS Is
+
+EBYS is the system Cricket runs inside. It has two parts: a directory of Montreal music events — shows, concerts, performances, web-scraped and fed by the community — and a generative webradio that plays continuously in the background. The radio is Cricket. Artists submit tracks through the site; those tracks become the raw material Cricket remixes in real time. The Montreal scene becomes its own soundtrack.
+
 ---
 
 ## How Slice Selection Works
