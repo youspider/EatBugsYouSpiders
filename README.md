@@ -1,7 +1,7 @@
 # © Eat Bugs You Spiders!
 
 Cricket — Vibe Djing instrument / Webradio générative
-Montréal, 2023 — en cours
+Montréal, 2025 — en cours
 Licence : AGPL-3.0
 
 ---
