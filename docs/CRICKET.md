@@ -404,6 +404,31 @@ Examples:
 - **madmom_tagger.py** — Beat/downbeat detection. Run via `:tagBeats`.
 - **demucs_env/** — Python virtual environment with madmom and demucs installed.
 - **stems/htdemucs/** — Where Demucs puts separated stems, organized by track name.
-- **analysis/** — JSON files with slice descriptors, one per track/stem.
+- **analysis_library.json** — full slice descriptor store: C, E, F, P, H, T per slice per stem per track.
+- **genres.json** — Essentia genre tags per track (top 5 genres with confidence scores).
 - **downbeats.json** — madmom output: BPM, meter, downbeat positions, confidence per track.
+- **training_log.jsonl** — Cricket's taste memory. One line per `:bake`. Grows over sessions.
 - **CRICKET.md** — this file. Cricket's knowledge base, loaded at startup.
+
+---
+
+## Training Cricket — The :bake System
+
+Cricket learns from how you correct it. The loop works like this:
+
+1. You give a musical instruction — *"make it darker"*
+2. Cricket outputs commands — its best guess
+3. You listen. If it's not quite right, you send additional `:commands` to correct it
+4. You type `:bake`
+
+`:bake` writes a snapshot to `training_log.jsonl` containing:
+- **intent** — your original instruction ("make it darker")
+- **cricket_cmds** — what Cricket generated
+- **user_corrections** — the commands you sent manually after
+- **final_cmds** — the combined result that sounded right
+- **stems** — live descriptor state (C, E, F, P, H, T per stem) at the moment of baking
+- **track** and **bpm** at bake time
+
+The correction delta is the training signal. Cricket doesn't just learn "darker = these commands" — it learns "when I tried X and you corrected it to Y, Y was closer to what darker means in this context."
+
+After enough bakes (200–500), the `training_log.jsonl` becomes the dataset for fine-tuning a local model that knows this instrument and your taste specifically. The conversion from raw snapshots to fine-tuning format is a separate script run once, not during sessions.
