@@ -9,6 +9,6 @@ Licence : AGPL-3.0
 ## Documentation
 
 - [`CRICKET.md`](./docs/CRICKET.md) — documentation principale : paramètres, commandes, descripteurs, comportement du système
-- [`STATEMENT.md`](./docs/STATEMENT.md) — Chirp!
+- [`STATEMENT.md`](./docs/STATEMENT.md) — chirp!
 
 run TUI node sdj-tui.js 
