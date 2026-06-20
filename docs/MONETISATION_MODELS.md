@@ -6,9 +6,9 @@ EBYS is GPL. The source is free, modifiable, and redistributable by anyone. The 
 
 ## Nag Screen
 
-Reaper-style. EBYS runs fully without restriction, but periodically surfaces a prompt asking the user to support the project. No expiration, no feature lock. Just guilt — which works, especially with people who rely on the tool professionally.
+EBYS runs fully without restriction. No expiration, no feature lock. Occasionally — subtly — a soft reminder surfaces asking the user to support the project. A small line in the TUI, a note on the website, maybe a quiet prompt after a long session. Present enough to plant the idea, never aggressive enough to feel like pressure.
 
-The nag screen fits the ethos: you're not extracting money by force, you're inviting people who find value in the work to contribute to it.
+Not on the hardware bundle. The reminder is for people running EBYS freely from the website — a gentle nudge that the work behind it is worth something.
 
 ---
 
@@ -40,7 +40,7 @@ This could be:
 
 Whether insect protein, lab-grown meat, or something else entirely takes hold in food culture is an open question. The domain is speculative but coherent with the name.
 
-There is also a deeper analogy: the system itself behaves like proteins — slices binding to slices by descriptor affinity, Cricket learning and adapting through correction, the whole thing folding into something alive through repeated interaction.
+There is also a deeper analogy: the system itself behaves like proteins — slices binding to slices by descriptor affinity, Cricket learning and adapting through correction, the whole thing folding into something alive through repeated interaction. The name was never just a joke.
 
 ---
 
