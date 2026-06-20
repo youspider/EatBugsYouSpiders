@@ -1,94 +1,141 @@
-// EBYS — Slot Router
+// EBYS — Slot Router  v4
 //
-// Receives slicer.js outlet 0 messages, handles multi-track buffer switching,
-// and drives karma~ for each stem.
+// ── Role ──────────────────────────────────────────────────────────────────────
+// Slot Router is the audio engine parameter hub of EBYS.  It owns all DSP
+// settings: it is the only JS object that sends messages to karma~ or pfft~.
 //
-// Input format (from slicer outlet 0, routed by stem name):
-//   vocals  slot  startFrac  endFrac  stretchRatio  segDurMs
-//   melody  slot  startFrac  endFrac  stretchRatio  segDurMs
-//   bass    slot  startFrac  endFrac  stretchRatio  segDurMs
-//   drums   slot  startFrac  endFrac  stretchRatio  segDurMs
+// Responsibilities:
+//   - Tempo axis: translates stretchRatio → karma~ speed factor (right inlet),
+//     so playback is faster/slower without slicer.js knowing about audio objects
+//   - Buffer switching: tells each karma~ which ring buffer to play and seeks it
+//   - Delay timing: computes the stretched segment duration so the next segment
+//     fires at the right moment
+//   - Pitch axis: translates semitone offsets → frequency ratios and sends them
+//     to pfft~/gizmo~ per stem, fully independent of tempo
 //
-// For each stem, this object outputs 3 things in order:
-//   1. "set play_N_stem"  → karma~ : switch to the right source track buffer
-//   2. seek position      → karma~ : float (startFrac × totalFrames, sample-accurate)
-//   3. segDurMs           → delay  : delay time in ms before "next <stem>" fires
+// Slot Router does NOT make musical decisions.  It receives ready-to-play
+// commands from buffer_manager.js and real-time parameter changes from
+// ws_server.js (via the route object).  All sequencing logic lives in slicer.js.
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// Receives play commands from buffer_manager.js and drives karma~ + pfft~/gizmo~.
+//
+// Two independent axes:
+//   TEMPO  — karma~ speed inlet (right) = 1/stretchRatio
+//              pitch follows as a tape side-effect (slower → lower)
+//   PITCH  — pfft~/gizmo~ pitch ratio per stem, fully independent of duration
+//              setPitch melody 1.5   → raise melody ~8 semitones, no timing change
+//
+// Input format (from buffer_manager outlet 12):
+//   vocals  ringSlot  segDurMs  stretchRatio
+//   melody  ringSlot  segDurMs  stretchRatio
+//   bass    ringSlot  segDurMs  stretchRatio
+//   drums   ringSlot  segDurMs  stretchRatio
+//
+// Commands:
+//   setPitch vocals 1.0           → reset (no shift)
+//   setPitch melody 1.5           → raise melody by ~8 semitones
+//   setPitchSemitones melody 3    → raise melody 3 semitones (2^(3/12))
+//   setPitch all 1.0              → reset all stems
 //
 // ── Outlets ───────────────────────────────────────────────────────────────────
-//   0  → karma~ vocals   "set play_N_voc"  (buffer switch — fires FIRST)
-//   1  → karma~ vocals   seek position (float, sample index)
-//   2  → delay  vocals   segDurMs (ms) — sets delay time before next trigger
-//   3  → karma~ melody   "set play_N_mel"
-//   4  → karma~ melody   seek position
-//   5  → delay  melody   segDurMs
-//   6  → karma~ bass     "set play_N_bss"
-//   7  → karma~ bass     seek position
-//   8  → delay  bass     segDurMs
-//   9  → karma~ drums    "set play_N_drm"
-//  10  → karma~ drums    seek position
-//  11  → delay  drums    segDurMs
-//
-// NOTE: The seek position is computed as startFrac × buffer.framecount(), where
-// the buffer is the NEWLY SWITCHED buffer (play_N_stem).  If the buffer is empty
-// (framecount = 0) the slot is skipped and a warning is posted.
+//   0  → karma~ vocals   inlet 0   "set ring_N_voc"
+//   1  → karma~ vocals   inlet 0   seek 0 (via t b b f → play)
+//   2  → delay  vocals             segDurMs
+//   3  → karma~ melody  inlet 0   "set ring_N_mel"
+//   4  → karma~ melody  inlet 0   seek 0
+//   5  → delay  melody            segDurMs
+//   6  → karma~ bass    inlet 0   "set ring_N_bss"
+//   7  → karma~ bass    inlet 0   seek 0
+//   8  → delay  bass              segDurMs
+//   9  → karma~ drums   inlet 0   "set ring_N_drm"
+//  10  → karma~ drums   inlet 0   seek 0
+//  11  → delay  drums             segDurMs
+//  12  → karma~ vocals  inlet 1   speed factor (1/stretchRatio, tape tempo)
+//  13  → karma~ melody  inlet 1   speed factor
+//  14  → karma~ bass    inlet 1   speed factor
+//  15  → karma~ drums   inlet 1   speed factor
+//  16  → pfft~/gizmo~ vocals      pitch ratio (independent of duration)
+//  17  → pfft~/gizmo~ melody      pitch ratio
+//  18  → pfft~/gizmo~ bass        pitch ratio
+//  19  → pfft~/gizmo~ drums       pitch ratio
 
 autowatch = 1;
-inlets    = 1;   // receives all 4 stems (routed by first word via Max route object)
-outlets   = 12;  // 3 per stem
+inlets    = 1;
+outlets   = 20;
 
-// Stem short names for buffer naming: play_<slot>_<short>
 var STEM_SHORT = { vocals: "voc", melody: "mel", bass: "bss", drums: "drm" };
+var STEM_BASE  = { vocals: 0,     melody: 3,     bass: 6,     drums: 9     };
+var SPEED_OUT  = { vocals: 12,    melody: 13,    bass: 14,    drums: 15    };
+var PITCH_OUT  = { vocals: 16,    melody: 17,    bass: 18,    drums: 19    };
 
-// Outlet base index per stem
-var STEM_BASE = { vocals: 0, melody: 3, bass: 6, drums: 9 };
+// Per-stem pitch ratio for gizmo~ — independent of tempo.
+// 1.0 = no shift. 2^(n/12) for n semitones.
+var stemPitch = { vocals: 1.0, melody: 1.0, bass: 1.0, drums: 1.0 };
 
-// ── Core router ───────────────────────────────────────────────────────────────
-function routeStem(stem, slot, startFrac, endFrac, stretchRatio, segDurMs) {
-    var shortName = STEM_SHORT[stem];
-    var base      = STEM_BASE[stem];
-    if (shortName === undefined || base === undefined) {
-        post("slot_router: unknown stem '" + stem + "'\n");
-        return;
+function routeStem(stem, ringSlot, segDurMs, stretchRatio) {
+    var sh   = STEM_SHORT[stem];
+    var base = STEM_BASE[stem];
+    if (sh === undefined) { post("slot_router: unknown stem '" + stem + "'\n"); return; }
+
+    stretchRatio = parseFloat(stretchRatio) || 1.0;
+
+    // Tempo: karma~ plays at 1/stretchRatio speed → pitch follows (tape-style)
+    // Actual playback duration = segDurMs * stretchRatio → delay must match
+    var speedFactor = 1.0 / stretchRatio;
+    var delayMs     = Math.round(parseFloat(segDurMs) * stretchRatio) || 1000;
+    var bufName     = "ring_" + parseInt(ringSlot) + "_" + sh;
+
+    outlet(SPEED_OUT[stem], speedFactor);          // karma~ speed inlet
+    outlet(base + 0, "set", bufName);              // switch karma~ buffer
+    outlet(base + 2, delayMs);                     // delay time (stretched)
+    outlet(base + 1, 0);                           // seek 0 → play
+
+    if (stretchRatio !== 1.0) {
+        post("slot_router [" + stem + "]: speed=" + speedFactor.toFixed(3)
+             + "  stretch=" + stretchRatio.toFixed(3)
+             + "  delay=" + delayMs + "ms\n");
     }
+}
 
-    slot        = parseInt(slot)        || 0;
-    startFrac   = parseFloat(startFrac) || 0;
-    segDurMs    = parseFloat(segDurMs)  || 1000;
+function vocals(ringSlot, segDurMs, stretchRatio) { routeStem("vocals", ringSlot, segDurMs, stretchRatio); }
+function melody(ringSlot, segDurMs, stretchRatio) { routeStem("melody", ringSlot, segDurMs, stretchRatio); }
+function bass  (ringSlot, segDurMs, stretchRatio) { routeStem("bass",   ringSlot, segDurMs, stretchRatio); }
+function drums (ringSlot, segDurMs, stretchRatio) { routeStem("drums",  ringSlot, segDurMs, stretchRatio); }
 
-    var bufName = "play_" + slot + "_" + shortName;
+// ── Per-stem pitch control ────────────────────────────────────────────────────
+// Sends pitch ratio directly to the gizmo~ inside each stem's pfft~.
+// Pitch is independent of playback speed — only affects frequency content.
 
-    // Get frame count from the target buffer so we can compute a sample-accurate
-    // seek position.  karma~ accepts a sample index (integer or float).
-    var buf         = new Buffer(bufName);
-    var totalFrames = buf.framecount();
-
-    if (totalFrames <= 0) {
-        post("slot_router [" + stem + "]: buffer '" + bufName
-             + "' has no frames — track not loaded for slot " + slot + "\n");
-        return;
+function setPitch(stem, ratio) {
+    ratio = parseFloat(ratio);
+    if (isNaN(ratio) || ratio <= 0) {
+        post("slot_router: setPitch — invalid ratio " + ratio + "\n"); return;
     }
+    var targets = (String(stem) === "all")
+        ? ["vocals", "melody", "bass", "drums"]
+        : [String(stem)];
 
-    var seekSamp = Math.round(startFrac * totalFrames);
-
-    // Fire in order: switch buffer → update delay time → seek+play.
-    // The delay time (outlet base+2) must arrive at the delay object's right inlet
-    // BEFORE the delay trigger fires (which happens when karma~ receives 'play' via
-    // the t b b f object connected to outlet base+1).
-    outlet(base + 0, "set", bufName);   // 1. switch karma~ buffer
-    outlet(base + 2, segDurMs);         // 2. set delay time (ms) before trigger fires
-    outlet(base + 1, seekSamp);         // 3. seek position → t b b f → play + delay trigger
+    for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        if (!stemPitch.hasOwnProperty(t)) {
+            post("slot_router: setPitch — unknown stem '" + t + "'\n"); continue;
+        }
+        stemPitch[t] = ratio;
+        outlet(PITCH_OUT[t], ratio);
+        post("slot_router: pitch[" + t + "] = " + ratio.toFixed(4)
+             + "  (" + (Math.log(ratio) / Math.log(2) * 12).toFixed(2) + " st)\n");
+    }
 }
 
-// ── Per-stem handlers (called by Max route object) ────────────────────────────
-function vocals(slot, startFrac, endFrac, stretchRatio, segDurMs) {
-    routeStem("vocals", slot, startFrac, endFrac, stretchRatio, segDurMs);
+function setPitchSemitones(stem, n) {
+    n = parseFloat(n);
+    if (isNaN(n)) { post("slot_router: setPitchSemitones — invalid value\n"); return; }
+    setPitch(stem, Math.pow(2, n / 12.0));
 }
-function melody(slot, startFrac, endFrac, stretchRatio, segDurMs) {
-    routeStem("melody", slot, startFrac, endFrac, stretchRatio, segDurMs);
-}
-function bass(slot, startFrac, endFrac, stretchRatio, segDurMs) {
-    routeStem("bass", slot, startFrac, endFrac, stretchRatio, segDurMs);
-}
-function drums(slot, startFrac, endFrac, stretchRatio, segDurMs) {
-    routeStem("drums", slot, startFrac, endFrac, stretchRatio, segDurMs);
+
+// pitchShift — TUI command :pitchShift <stem> <semitones>
+// Alias for setPitchSemitones, named to match the TUI command directly.
+function pitchShift(stem, semitones) {
+    setPitchSemitones(stem, semitones);
 }

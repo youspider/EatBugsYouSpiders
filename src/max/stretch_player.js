@@ -29,11 +29,13 @@ outlets   = 12;
 
 // play_* = playback buffers (loaded by track_loader.js).
 // stem_* = analysis buffers (loaded by analyze_reader.js) — do NOT reference those here.
+// play_N_* = per-slot playback buffers (slot 0 = first alphabetical track).
+// stretch_player reads from slot 0 by default; extend for multi-slot stretch later.
 var STEM_CFG = {
-    vocals: { src: 'play_vocals', idx: 0 },
-    melody: { src: 'play_melo',   idx: 1 },
-    bass:   { src: 'play_bass',   idx: 2 },
-    drums:  { src: 'play_drums',  idx: 3 },
+    vocals: { src: 'ring_0_voc', idx: 0 },
+    melody: { src: 'ring_0_mel', idx: 1 },
+    bass:   { src: 'ring_0_bss', idx: 2 },
+    drums:  { src: 'ring_0_drm', idx: 3 },
 };
 
 // Per-stem pending state while async processing runs

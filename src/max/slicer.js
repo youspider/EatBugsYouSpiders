@@ -1,5 +1,23 @@
 // EBYS — Slicer  v2
 //
+// ── Role ──────────────────────────────────────────────────────────────────────
+// Slicer.js is the sequencing brain of EBYS.  It owns all scheduling and
+// musical decision-making: which segment plays next, when it fires, how long
+// it runs, and whether the transport is running at all.
+//
+// Responsibilities:
+//   - Index: parses the descriptor dict to build a slice database per stem
+//   - Segment selection: picks musically coherent segments (bar-aligned,
+//     consecutive slices, weighted by descriptor similarity)
+//   - Transport: start / stop / next — drives the looping playback clock
+//   - BPM-aware timing: computes stretchRatio = srcBPM / globalBPM so the
+//     audio engine can slow/speed karma~ without slicer knowing about audio
+//   - Loop / stay logic: STAY_PROB and explicit loop locks for performance control
+//
+// Slicer does NOT touch audio objects or DSP parameters directly.
+// It emits play triggers on outlet 0 that buffer_manager.js consumes.
+// ──────────────────────────────────────────────────────────────────────────────
+//
 // Changes from v1:
 //   - selectSegment() replaces selectRandom() — groups consecutive slices
 //     into musically meaningful segments (SEGMENT_BARS bars long).
@@ -67,7 +85,6 @@ outlets   = 6;   // outlet 4 = fluid.dataset~ ebys.descriptors, outlet 5 = fluid
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 var TRACKS                 = ["vocals", "melody", "bass", "drums"];
-var DICT_NAME              = "analysisLib";
 var LAST_SLICE_DEFAULT_DUR = 0.005; // fraction — fallback dur for the last slice (~0.5% of buffer)
 
 // ── MUSICAL PARAMETERS ────────────────────────────────────────────────────────
@@ -106,6 +123,95 @@ function setStemDurMs(track, ms) {
         post("EBYS Slicer: stemDurMs[" + track + "] = "
              + (stemDurMs[track] / 1000).toFixed(2) + "s\n");
         outlet(1, "stemDurMs", track, stemDurMs[track]);
+    }
+}
+
+// ── LIBRARY CHUNK ACCUMULATOR ─────────────────────────────────────────────────
+// ws_server.js sends the 1+ MB analysis_library.json in 2 KB chunks to bypass
+// Max's 32 767-byte JsFile limit and N4M's setDict size ceiling.
+var cachedLibrary    = null;   // parsed library object, set once all chunks arrive
+var libChunkBuf      = null;   // Array(total) of string chunks
+var libChunkTotal    = 0;
+var libChunkReceived = 0;
+
+function libchunk() {
+    // Max splits symbol atoms on spaces, so a JSON chunk containing spaces arrives
+    // as multiple atoms.  Collect ALL args, then rejoin index 2+ with a single space
+    // to reconstruct the original chunk string.
+    var args = arrayfromargs(arguments);
+    var i = parseInt(args[0]);
+    var t = parseInt(args[1]);
+    // Atoms from index 2 onward are the chunk data — rejoin with space.
+    var data = args.slice(2).join(' ');
+
+    if (!libChunkBuf || libChunkTotal !== t) {
+        libChunkBuf      = new Array(t);
+        libChunkTotal    = t;
+        libChunkReceived = 0;
+    }
+    libChunkBuf[i] = data;
+    libChunkReceived++;
+    if (libChunkReceived === t) {
+        var assembled = libChunkBuf.join('');
+        libChunkBuf = null;
+        try {
+            cachedLibrary = JSON.parse(assembled);
+            post("EBYS Slicer: library cached via chunks ("
+                 + assembled.length + " chars, " + t + " chunks)\n");
+            // If buildIndex arrived before chunks finished, run it now.
+            if (buildIndexPending) buildIndex();
+        } catch(e) {
+            post("EBYS Slicer: chunk assembly parse failed — " + e + "\n");
+            post("EBYS Slicer: assembled[0..100] = " + assembled.substring(0, 100) + "\n");
+            cachedLibrary = null;
+        }
+    }
+}
+
+// ── GENRE STATE ───────────────────────────────────────────────────────────────
+// trackGenres[trackName] = ["Electronic---Techno", "Electronic---House", ...]
+// Populated from genres.json via genrechunk messages from ws_server.js.
+// genreFilter: substring match against genre strings (case-insensitive). null = no filter.
+var trackGenres      = {};
+var genreFilter      = null;   // e.g. "Techno", "House", "Jazz"
+
+var genreChunkBuf      = null;
+var genreChunkTotal    = 0;
+var genreChunkReceived = 0;
+
+function genrechunk() {
+    var args = arrayfromargs(arguments);
+    var i = parseInt(args[0]);
+    var t = parseInt(args[1]);
+    var data = args.slice(2).join(' ');
+
+    if (!genreChunkBuf || genreChunkTotal !== t) {
+        genreChunkBuf      = new Array(t);
+        genreChunkTotal    = t;
+        genreChunkReceived = 0;
+    }
+    genreChunkBuf[i] = data;
+    genreChunkReceived++;
+    if (genreChunkReceived === t) {
+        var assembled = genreChunkBuf.join('');
+        genreChunkBuf = null;
+        try {
+            var gdata = JSON.parse(assembled);
+            trackGenres = {};
+            for (var trackName in gdata) {
+                var entry = gdata[trackName];
+                if (entry && entry.genres && entry.genres.length) {
+                    // Store top-5 genre strings for this track
+                    trackGenres[trackName] = entry.genres.slice(0, 5).map(function(g) {
+                        return g.genre;
+                    });
+                }
+            }
+            post("EBYS Slicer: genres loaded — "
+                 + Object.keys(trackGenres).length + " tracks\n");
+        } catch(e) {
+            post("EBYS Slicer: genre chunk parse failed — " + e + "\n");
+        }
     }
 }
 
@@ -168,24 +274,54 @@ function cleanTrackName(stem) {
 }
 
 // ── BUILD INDEX ───────────────────────────────────────────────────────────────
-// Read library directly from JSON file (bypasses unreliable deep-nested dict.get()
-// which fails at 4+ levels of :: nesting in Max's JS Dict API).
-function getLibraryPath() {
-    // Use a bare filename — Max resolves it relative to the patcher folder,
-    // same as INDEX_FILE ("ebys_index.json") and "../downbeats.json".
-    return "analysis_library.json";
+// Read library directly from JSON file — bypasses Max.setDict / Dict API entirely.
+// Max Dict JSON export prepends `{}` as a preamble (byte 1 is `}` where valid JSON
+// needs `"`).  Fix: replace the leading `{}` with `{"` before parsing.
+
+function readLibraryJSON() {
+    // Primary path: ws_server.js delivered the JSON in chunks before buildIndex arrived.
+    if (cachedLibrary) return cachedLibrary;
+    // If chunks haven't arrived yet, log and bail — buildIndex will be retried by the user.
+    post("EBYS Slicer: no cached library — send buildIndex after patch is fully loaded\n");
+    return null;
 }
 
+// Thin shim so the rest of buildIndex can use .get() / .getkeys()
+// without touching the Dict API at all.
+// Primitives (numbers, strings, booleans) are returned as-is so that
+// parseFloat(metaDict.get("BPM")) etc. work unchanged.
+function wrapObj(obj) {
+    if (obj === null || obj === undefined) return null;
+    if (typeof obj !== "object") return obj;  // pass primitives through directly
+    return {
+        get:     function(k) { return wrapObj(obj[k]); },
+        getkeys: function()  { return Object.keys(obj); }
+    };
+}
+
+var buildIndexPending = false;  // true while waiting for chunks to finish
+
 function buildIndex() {
+    // If chunks are still in flight, defer until the last libchunk arrives.
+    if (libChunkBuf !== null && libChunkReceived < libChunkTotal) {
+        post("EBYS Slicer: chunks still arriving (" + libChunkReceived + "/" + libChunkTotal + ") — deferring buildIndex\n");
+        buildIndexPending = true;
+        return;
+    }
+
+    buildIndexPending = false;
     idx     = [];
     byTrack = {};
     meta    = {};
     ranges  = {};
     slotMap = {};
 
-    // ws_server.js (Node) pre-reads analysis_library.json and calls Max.setDict('_ebysLib_', data)
-    // before forwarding the buildIndex message here — so the dict is already populated.
-    var d = new Dict("_ebysLib_");
+    var lib = readLibraryJSON();
+    if (!lib) {
+        post("EBYS Slicer: analysis library is empty — run analysis first\n");
+        return;
+    }
+    var d = wrapObj(lib);
 
     var topKeys = d.getkeys();
     if (!topKeys || !topKeys.length) {
@@ -339,7 +475,8 @@ function buildIndex() {
                     M5  : parseFloat(sd.get("M5"))   || 0,
                     tension_C: tval("tension_C"), tension_E: tval("tension_E"), tension_F: tval("tension_F"),
                     tension_P: tval("tension_P"), tension_H: tval("tension_H"), tension_T: tval("tension_T"),
-                    BPM: BPM, key: mkey, dur: LAST_SLICE_DEFAULT_DUR
+                    BPM: BPM, key: mkey, dur: LAST_SLICE_DEFAULT_DUR,
+                    genres: trackGenres[sourceName] || []
                 };
                 sub.push(slice);
             }
@@ -674,6 +811,7 @@ function selectSegment(track) {
     if (QUANTIZE_BARS && hasDur) {
         var aligned = [];
         for (var i = 0; i < arr.length; i++) {
+            if (!sliceMatchesGenre(arr[i])) continue;
             var sliceDurMs = arr[i].stemDurMs || stemDurMs[track] || 0;
             if (sliceDurMs <= 0) { aligned.push(i); continue; }
             var posMs = arr[i].time * sliceDurMs;
@@ -683,7 +821,14 @@ function selectSegment(track) {
     }
     if (!pool) {
         pool = [];
-        for (var i = 0; i < arr.length; i++) pool.push(i);
+        for (var i = 0; i < arr.length; i++) {
+            if (sliceMatchesGenre(arr[i])) pool.push(i);
+        }
+        // If genre filter returns nothing, fall back to all slices
+        if (pool.length === 0) {
+            for (var i = 0; i < arr.length; i++) pool.push(i);
+            post("EBYS Slicer [" + track + "]: genre filter '" + genreFilter + "' matched 0 slices — ignoring filter\n");
+        }
     }
 
     // Stay-or-move decision
@@ -775,6 +920,18 @@ function selectSegment(track) {
     //   segDurMs    = segment duration in ms — slot_router.js uses this for delay timing
     outlet(0, track, startSlice.slot || 0, startSlice.time, endFrac,
            stretchRatioFor(track), Math.round(segDurMs));
+
+    // Speculative preload: guess the next source track and tell buffer_manager
+    // to start disk loading now — so the track is ready when the next segment fires.
+    // buffer_manager ignores this if the track is already loaded.
+    if (arr.length > 0) {
+        var nextArr  = byTrack[track];
+        var nextIdx  = Math.floor(Math.random() * nextArr.length);
+        var nextSlot = (nextArr[nextIdx] && nextArr[nextIdx].slot !== undefined)
+                       ? nextArr[nextIdx].slot : 0;
+        outlet(0, "preload", track, nextSlot);
+    }
+
     outlet(1, "desc",      track, startSlice.C, startSlice.E, startSlice.F, startSlice.P, startSlice.H, startSlice.T,
            startSlice.tension_C, startSlice.tension_E, startSlice.tension_F,
            startSlice.tension_P, startSlice.tension_H, startSlice.tension_T);
@@ -1133,6 +1290,47 @@ function applyNow() {
     for (var t = 0; t < TRACKS.length; t++) selectSegment(TRACKS[t]);
 }
 
+// ── GENRE FILTER ─────────────────────────────────────────────────────────────
+// setGenreFilter Techno    — only play slices from tracks tagged with "Techno"
+// setGenreFilter House     — case-insensitive substring match against genre strings
+// clearGenreFilter         — remove filter, play from all tracks
+// listGenres               — print available genres to Max console
+function setGenreFilter() {
+    var parts = [];
+    for (var i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+    genreFilter = parts.join(" ").trim() || null;
+    if (genreFilter) {
+        post("EBYS Slicer: genre filter = '" + genreFilter + "'\n");
+        outlet(1, "genreFilter", genreFilter);
+    } else {
+        post("EBYS Slicer: genre filter cleared\n");
+        outlet(1, "genreFilter", "none");
+    }
+}
+
+function clearGenreFilter() {
+    genreFilter = null;
+    post("EBYS Slicer: genre filter cleared\n");
+    outlet(1, "genreFilter", "none");
+}
+
+function listGenres() {
+    var seen = {};
+    for (var trackName in trackGenres) {
+        var gs = trackGenres[trackName];
+        post("  " + trackName + ":\n");
+        for (var gi = 0; gi < gs.length; gi++) {
+            var g = gs[gi];
+            if (!seen[g]) { seen[g] = 0; }
+            seen[g]++;
+            post("    " + (gi+1) + ". " + g + "\n");
+        }
+    }
+    var allGenres = Object.keys(seen).sort();
+    post("EBYS Slicer: unique genres — " + allGenres.join(", ") + "\n");
+    outlet(1, "genres", allGenres.join(","));
+}
+
 // ── DESCRIPTOR DUMP ───────────────────────────────────────────────────────────
 function dumpDescriptors(trackFilter) {
     var pool = (trackFilter && byTrack[trackFilter]) ? byTrack[trackFilter] : idx;
@@ -1147,6 +1345,16 @@ function dumpDescriptors(trackFilter) {
 }
 
 // ── RANGE QUERY ───────────────────────────────────────────────────────────────
+function sliceMatchesGenre(s) {
+    if (!genreFilter) return true;
+    var gf = genreFilter.toLowerCase();
+    var gs = s.genres || [];
+    for (var gi = 0; gi < gs.length; gi++) {
+        if (gs[gi].toLowerCase().indexOf(gf) !== -1) return true;
+    }
+    return false;
+}
+
 function queryRange(trackFilter, Clo, Chi, Elo, Ehi, Flo, Fhi, Plo, Phi) {
     var pool = (trackFilter && byTrack[trackFilter]) ? byTrack[trackFilter] : idx;
     var result = [];
@@ -1156,6 +1364,7 @@ function queryRange(trackFilter, Clo, Chi, Elo, Ehi, Flo, Fhi, Plo, Phi) {
         if (s.E < Elo || s.E > Ehi) continue;
         if (s.F < Flo || s.F > Fhi) continue;
         if (s.P < Plo || s.P > Phi) continue;
+        if (!sliceMatchesGenre(s)) continue;
         result.push(s);
     }
     return result;

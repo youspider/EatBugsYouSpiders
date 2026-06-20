@@ -32,7 +32,7 @@ const state = {
 // Pre-check: if analysis_library.json already has entries, mark analysisDone now so
 // new TUI clients that connect after the patch loads get the flag immediately.
 try {
-    const lib = JSON.parse(fs.readFileSync(path.join(__dirname, 'analysis_library.json'), 'utf8'));
+    const lib = parseMaxDictJSON(fs.readFileSync(path.join(__dirname, 'analysis_library.json'), 'utf8'));
     if (Object.keys(lib).length > 0) {
         state.analysisDone = true;
         Max.post('ws_server: library present — analysisDone pre-set\n');
@@ -153,10 +153,38 @@ server.on('upgrade', (req, socket) => {
             if (msg === null) { socket.destroy(); return; }
             try {
                 const m = JSON.parse(msg);
+
+                // :bake — save training snapshot (intent + Cricket cmds + user corrections + live state)
+                if (m.type === 'bake') {
+                    const snapshot = {
+                        timestamp:        new Date().toISOString(),
+                        intent:           m.intent           || '',
+                        cricket_cmds:     m.cricket_cmds     || [],
+                        user_corrections: m.user_corrections || [],
+                        final_cmds:       m.final_cmds       || [],
+                        track:            state.track,
+                        bpm:              state.bpm,
+                        stems:            JSON.parse(JSON.stringify(state.stems)),
+                    };
+                    const logPath = path.join(__dirname, '..', 'training_log.jsonl');
+                    fs.appendFileSync(logPath, JSON.stringify(snapshot) + '\n');
+                    Max.post('ws_server: 🫳 baked\n');
+                    broadcast({ type: 'sys', msg: '🫳 baked' });
+                    return;
+                }
+
                 if (m.type === 'command' && m.text) {
                     const parts = m.text.trim().split(/\s+/);
                     const atoms = parts.map(p => isNaN(p) ? p : parseFloat(p));
-                    if (atoms[0] === 'buildIndex') {
+                    if (atoms[0] === 'pitchShift') {
+                        // :pitchShift <stem> <semitones>
+                        // stem = vocals | melody | bass | drums | all
+                        // semitones = positive (up) or negative (down), e.g. 3 or -2
+                        const stem      = String(atoms[1] || 'all');
+                        const semitones = parseFloat(atoms[2]) || 0;
+                        broadcast({ type: 'param', key: 'pitchShift', stem, semitones });
+                        Max.outlet('pitchShift', stem, semitones);
+                    } else if (atoms[0] === 'buildIndex') {
                         // Pre-populate the named dict from Node before triggering slicer.js,
                         // then run t-SNE in the background (no patch wiring needed).
                         prepareLibraryDict()
@@ -176,7 +204,7 @@ server.on('upgrade', (req, socket) => {
                     } else {
                         Max.outlet(...atoms);
                     }
-                }
+                }  // end command
             } catch(e) {}
         });
     });
@@ -200,13 +228,47 @@ server.listen(PORT, () => {
 // slicer.js then opens the same named dict — no file I/O in the JS object needed.
 let cachedLibraryData = null;
 
-async function prepareLibraryDict() {
+// Max Dict JSON export uses `{}` as a preamble — byte 1 is `}` where standard JSON
+// needs `"`. Fix: replace the leading `{}` with `{"` before parsing.
+function parseMaxDictJSON(raw) {
+    if (raw.charCodeAt(0) === 0x7b && raw.charCodeAt(1) === 0x7d) {
+        raw = '{"' + raw.slice(2);
+    }
+    return JSON.parse(raw);
+}
+
+function prepareLibraryDict() {
     const libPath = path.join(__dirname, 'analysis_library.json');
     const raw  = fs.readFileSync(libPath, 'utf8');
-    cachedLibraryData = JSON.parse(raw);
-    await Max.setDict('_ebysLib_', cachedLibraryData);
-    Max.post('ws_server: _ebysLib_ dict populated — '
-             + Object.keys(cachedLibraryData).length + ' top-level entries\n');
+    cachedLibraryData = parseMaxDictJSON(raw);
+
+    // Max.setDict fails for large nested objects (>~1 MB), and Max's built-in
+    // JsFile API is capped at 32 767 bytes — both too small for analysis_library.json.
+    // Solution: send the JSON string to slicer.js in 2 KB chunks via Max outlet.
+    // slicer.js accumulates libchunk messages and parses once all arrive.
+    const jsonStr = JSON.stringify(cachedLibraryData);
+    const CHUNK   = 2048;
+    const total   = Math.ceil(jsonStr.length / CHUNK);
+    Max.post('ws_server: sending library in ' + total + ' chunks (' + jsonStr.length + ' chars)…\n');
+    for (let i = 0; i < total; i++) {
+        Max.outlet('libchunk', i, total, jsonStr.substring(i * CHUNK, (i + 1) * CHUNK));
+    }
+    Max.post('ws_server: library chunks sent\n');
+
+    // Send genres.json the same way — slicer.js uses it to tag slices for genre filtering.
+    try {
+        const genresPath = path.join(__dirname, '..', 'genres.json');
+        const genresStr  = fs.readFileSync(genresPath, 'utf8');
+        const gt = Math.ceil(genresStr.length / CHUNK);
+        for (let i = 0; i < gt; i++) {
+            Max.outlet('genrechunk', i, gt, genresStr.substring(i * CHUNK, (i + 1) * CHUNK));
+        }
+        Max.post('ws_server: genres sent (' + gt + ' chunks)\n');
+    } catch(e) {
+        Max.post('ws_server: genres.json not found — genre filtering unavailable\n');
+    }
+
+    return Promise.resolve();  // keep .then()/.catch() callers happy
 }
 
 // ── Node-side t-SNE (replaces fluid.umap~ — no patch wiring needed) ──────────
