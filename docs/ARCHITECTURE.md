@@ -1,6 +1,6 @@
 # EBYS Architecture
 
-## Two Phases
+## Three Phases
 
 ### Analysis Phase — run once per track
 
@@ -70,6 +70,58 @@ downbeats.json         ──┘       ↓
 | `buffer_manager.js` | 2-level ring buffer manager — loads stems, drives fluid.bufcompose~ |
 | `slot_router.js` | **Audio engine hub** — sole owner of karma~/pfft~ messages; tempo axis (speed) + pitch axis (gizmo~) |
 | `ebys-pitch.maxpat` | pfft~ subpatch — `fftin~` → `gizmo~` → `fftout~`; `in 2` receives pitch ratio from slot_router |
+| `CRICKET.md` | Cricket's operational memory — descriptor meanings, command vocabulary, musical translations |
+| `training_log.jsonl` | Append-only bake log — intent + Cricket commands + user corrections + live descriptor state |
+| `convert_bakes.py` | Converts `training_log.jsonl` → MLX fine-tuning JSONL (instruction/response pairs) |
+| `finetune.sh` | LoRA fine-tune on Apple Silicon via `mlx-lm` — produces a Cricket model tuned to your taste |
+
+---
+
+---
+
+### Training Phase — ongoing, session-by-session
+
+Cricket is a local Ollama language model that controls EBYS through natural language. Over time it learns your taste via a correction loop:
+
+```
+User instruction ("make it darker")
+          │
+          ▼
+    Cricket (Ollama LLM)        interprets intent → outputs slicer commands
+          │
+          ▼
+    User listens → corrects     sends additional commands manually if needed
+          │
+          ▼
+    :bake                       TUI command — writes a training snapshot
+          │
+          ▼
+    training_log.jsonl          append-only JSONL, one line per bake:
+                                  intent, cricket_cmds, user_corrections,
+                                  final_cmds, live descriptor state (C/E/F/P/H/T),
+                                  track name, BPM at bake time
+```
+
+The **correction delta** is the training signal — not just "darker = these commands" but "when Cricket tried X and you corrected to Y, Y was closer to what darker means in this context and this descriptor state."
+
+After enough bakes (200–500), the log becomes a fine-tuning dataset:
+
+```
+training_log.jsonl
+          │
+          ▼
+    convert_bakes.py            converts bake snapshots → MLX fine-tuning JSONL
+                                (instruction/response pairs with descriptor context)
+          │
+          ▼
+    finetune.sh                 one-command LoRA fine-tune on Apple Silicon via mlx-lm
+                                (runs inside ~/ebys-mlx-env)
+          │
+          ▼
+    fine-tuned local model      Cricket that knows this library and your taste specifically
+```
+
+This loop runs offline, entirely on-device. No data leaves the machine.
 
 ---
 
