@@ -40,7 +40,7 @@ This could be:
 
 Whether insect protein, lab-grown meat, or something else entirely takes hold in food culture is an open question. The domain is speculative but coherent with the name.
 
-There is also a deeper analogy: the system itself behaves like proteins — slices binding to slices by descriptor affinity, Cricket learning and adapting through correction, the whole thing folding into something alive through repeated interaction. The name was never just a joke.
+There is also a deeper analogy: the system itself behaves like proteins — slices binding to slices by descriptor affinity, Cricket learning and adapting through correction, the whole thing folding into something alive through repeated interaction.
 
 ---
 
