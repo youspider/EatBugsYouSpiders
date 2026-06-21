@@ -4,6 +4,36 @@ When a listener tips a mix, the payment is split automatically between the curat
 
 ---
 
+## The Equation
+
+**Variables:**
+- π_i = payout for stem i
+- N = number of stems = 4
+- Φᵢ = sum of all follow weights pointing at stem i
+- Φ = sum of all follow weights in the entire graph
+
+```
+πᵢ = 0.8/N  +  0.2 · (Φᵢ / Φ)
+```
+
+```
+payout[i] = (0.8 / N)  +  0.2 * (sum_incoming[i] / total_follows)
+```
+
+N = 4, so the base simplifies to:
+
+```
+πᵢ = 0.2  +  0.2 · (Φᵢ / Φ)
+```
+
+```
+payout[i] = 0.2  +  0.2 * (sum_incoming[i] / total_follows)
+```
+
+Existence share + proportional share of attention.
+
+---
+
 ## Bottom Up
 
 The system is bottom up. Artists are the raw material. The curator shapes from what exists. The tip flows back down to the source. Value originates at the track level, rises through curation, returns to where it came from.
