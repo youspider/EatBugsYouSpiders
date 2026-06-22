@@ -1,6 +1,6 @@
 # © Eat Bugs You Spider!
 
-Cricket — Vibe Djing instrument / Webradio générative
+Cricket — Vibe Djing instrument / Indie Webradio
 Montréal, 2023 — en cours
 Licence : AGPL-3.0
 
