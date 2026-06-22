@@ -70,17 +70,25 @@ Drop audio file
   Sliding-window slope across bars → tension_C/E/F/P/H/T per slice
       │
       ▼
-[ws_server.js]            Stage 3 — Index Building
+[ws_server.js]            Stage 3a — Index Building (prep)
   prepareLibraryDict() → loads analysis_library.json into memory
+  Sends analysis data + genres to slicer.js in 2KB chunks
   computeAndWriteUMAP():
     ├─ extract 6-D features (C, E, F, P, H, T)
     ├─ write stem_ranges.json (descriptor min/max per stem)
     └─ tsne_worker.js (Worker thread): t-SNE → umap_coords.json
-  buildIndex: merge analysis + UMAP + genres → ebys_index.json (~2.8MB)
+  Sends umap_coords to slicer.js → triggers buildIndex
+      │
+      ▼
+[slicer.js]               Stage 3b — Index Assembly
+  Merges analysis + UMAP coords + genres + downbeats
+  Builds ebys_index (all slices, all tracks, all descriptors)
+  Sends ebys_index back → ws_server.js (saveIdxChunk, 2KB at a time)
+  ws_server.js writes ebys_index.json to disk (~2.8MB)
       │
       ▼
 [slicer.js]               Stage 4 — Live Playback
-  Receives ebys_index (idxchunk) and downbeats (downbeatchunk)
+  Index already in memory — no reload needed
   Selects next slice per stem using descriptor weights + match probs
   Sends play commands → buffer_manager.js → slot_router.js → karma~
       │
