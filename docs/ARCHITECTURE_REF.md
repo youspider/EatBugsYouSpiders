@@ -1,6 +1,6 @@
 # EBYS — Architecture Reference
 
-> **EBYS** (Eat Bugs You Spider!) is a real-time generative audio collage engine. It takes uploaded music, separates it into stems, analyzes every sonic slice, and rebuilds the music live from a pool of spectral-descriptor-indexed segments — driven by an AI personality (Cricket) running on a local LLM.
+> **EBYS** (Eat Bugs You Spider!) is a real-time generative audio collage engine. It separates uploaded music into stems, analyzes every transient slice, indexes them by spectral descriptor, and rebuilds the music live — driven by an AI personality (Cricket) running on a local LLM.
 
 ---
 
@@ -16,33 +16,35 @@
 8. [Stage 6 — Terminal UI (TUI)](#8-stage-6--terminal-ui-tui)
 9. [Data Files Reference](#9-data-files-reference)
 10. [Max Patch Infrastructure](#10-max-patch-infrastructure)
-11. [System Services & DevTools](#11-system-services--devtools)
-12. [Archive / BAK Files](#12-archive--bak-files)
+11. [System Services](#11-system-services)
+12. [Quick Reference: Who Talks to Whom](#12-quick-reference-who-talks-to-whom)
 
 ---
 
 ## 1. System Overview
 
-EBYS has three independent processes that communicate over WebSocket:
+Three independent processes communicate over WebSocket on port 8080:
 
 ```
-┌─────────────────────────────┐
-│   watch_demucs.py           │  ← runs as LaunchAgent (always on)
-│   Demucs + Essentia + madmom│  ← Python analysis
-└────────────┬────────────────┘
-             │  writes stems → EBYS_INFRA/stems/htdemucs/
-             │  writes analysis → MAX/analysis_library.json
+┌──────────────────────────────────┐
+│  watch_demucs.py                 │  ← LaunchAgent daemon (always on)
+│  Demucs + Essentia + madmom      │  ← Python analysis pipeline
+│  import_library.py               │  ← SQLite sync (ebys.db)
+└────────────┬─────────────────────┘
+             │  stems → EBYS_INFRA/stems/htdemucs/
+             │  JSON  → EBYS_INFRA/{genres,downbeats}.json
+             │  DB    → EBYS_INFRA/ebys.db
+             │  POST  → :8080/progress
              ▼
-┌─────────────────────────────┐        WebSocket :8080
-│   ebys-analyze.maxpat       │ ◄────────────────────────► TUI (sdj-tui.js)
-│   Max/MSP patch             │
-│   ├─ ws_server.js  (Node)   │  ← bridge: Max ↔ WebSocket
-│   ├─ slicer.js              │  ← slice selector / sequencer
-│   ├─ buffer_manager.js      │  ← disk → src → ring buffer chain
-│   ├─ slot_router.js         │  ← audio engine parameter hub
-│   ├─ analyze_reader.js      │  ← FluCoMa → slice_writer
-│   └─ slice_writer.js        │  ← persists analysis dict
-└─────────────────────────────┘
+┌──────────────────────────────────┐        WebSocket :8080
+│  ebys-analyze.maxpat  (Max/MSP)  │ ◄─────────────────────► TUI (sdj-tui.js)
+│  ├─ ws_server.js   (N4M Node)    │  ← bridge: Max ↔ WebSocket + t-SNE
+│  ├─ slicer.js                    │  ← sequencing brain
+│  ├─ buffer_manager.js            │  ← disk → src → ring buffer chain
+│  ├─ slot_router.js               │  ← sole owner of karma~/pfft~ messages
+│  ├─ analyze_reader.js            │  ← FluCoMa buffer reader
+│  └─ slice_writer.js              │  ← persists analysis dict to JSON
+└──────────────────────────────────┘
 ```
 
 ---
@@ -50,53 +52,55 @@ EBYS has three independent processes that communicate over WebSocket:
 ## 2. Pipeline at a Glance
 
 ```
-Drop audio file
-      │
-      ▼
-[watch_demucs.py]         Stage 1 — Ingestion
-  Demucs: separate into vocals / drums / bass / other
-  genre_tagger.py: Discogs-EffNet genre → genres.json
-  madmom_tagger.py: downbeat detection → downbeats.json
-      │
-      ▼
-[ebys-analyze.maxpat]     Stage 2 — Analysis (FluCoMa)
-  streamWatcher.js detects new stems
-  FluCoMa: slice, centroid, energy, flatness, pitch, MFCC, chroma
-  analyze_reader.js reads buf~ → slice_writer.js
-  slice_writer.js → analysis_library.json  (raw FluCoMa output ~1MB)
-      │
-      ▼
-[add_tension.py]          Stage 2b — Tension Fields (optional, offline)
-  Sliding-window slope across bars → tension_C/E/F/P/H/T per slice
-      │
-      ▼
-[ws_server.js]            Stage 3a — Index Building (prep)
-  prepareLibraryDict() → loads analysis_library.json into memory
-  Sends analysis data + genres to slicer.js in 2KB chunks
+Drop audio file into raw_uploads/
+        │
+        ▼
+[watch_demucs.py]                       Stage 1 — Ingestion
+  Demucs (htdemucs): vocals/drums/bass/other
+  genre_tagger.py: Discogs-EffNet → genres.json
+  madmom_tagger.py: downbeat/BPM detection → downbeats.json
+  → writes stream.txt  (stem paths for Max)
+  → POSTs stemsReady to /progress
+  → import_library.py: genres + downbeats → ebys.db
+        │
+        ▼
+[ebys-analyze.maxpat]                   Stage 2 — FluCoMa Analysis
+  streamWatcher.js polls stream.txt every 1s
+  FluCoMa: onset slice → C/S/E/F/P/H/M0–M5 per slice
+  analyze_reader.js → slice_writer.js → analysis_library.json (~1MB)
+        │
+        ▼
+[add_tension.py]  (run after analysis)  Stage 2b — Tension Fields
+  Sliding-window bar slope → tension_C/E/F/P/H/T per slice
+  Writes back to analysis_library.json
+  Syncs tension columns to ebys.db (if it exists)
+        │
+        ▼
+[ws_server.js]                          Stage 3a — Index Prep
+  prepareLibraryDict(): reads analysis_library.json (Node, no size limit)
+  Sends library + genres to slicer.js via hardened chunk streams
   computeAndWriteUMAP():
-    ├─ extract 6-D features (C, E, F, P, H, T)
-    ├─ write stem_ranges.json (descriptor min/max per stem)
-    └─ tsne_worker.js (Worker thread): t-SNE → umap_coords.json
-  Sends umap_coords to slicer.js → triggers buildIndex
-      │
-      ▼
-[slicer.js]               Stage 3b — Index Assembly
-  Merges analysis + UMAP coords + genres + downbeats
-  Builds ebys_index (all slices, all tracks, all descriptors)
-  Sends ebys_index back → ws_server.js (saveIdxChunk, 2KB at a time)
-  ws_server.js writes ebys_index.json to disk (~2.8MB)
-      │
-      ▼
-[slicer.js]               Stage 4 — Live Playback
-  Index already in memory — no reload needed
-  Selects next slice per stem using descriptor weights + match probs
-  Sends play commands → buffer_manager.js → slot_router.js → karma~
-      │
-      ▼
-[sdj-tui.js]              Stage 5 — Control Surface
-  Displays live descriptors, BPM, LUFS, slice position
-  User types commands: :bars 2, :brighter, :bake, :pitchShift melody 3
-  Cricket (Ollama LLM) interprets natural language → engine commands
+    extract 6-D features per stem → stem_ranges.json
+    spawn tsne_worker.js (child process, stdin/stdout) → umap_coords.json
+  buildIndexInProgress guard prevents duplicate builds
+        │
+        ▼
+[slicer.js]                             Stage 3b — Index Assembly
+  Assembles chunks → buildIndex()
+  Groups slices by stem/track, snaps starts to downbeat grid
+  Saves index back → ws_server.js (saveIdxChunk) → ebys_index.json (~2.8MB)
+        │
+        ▼
+[slicer.js]                             Stage 4 — Live Playback
+  Index already in memory
+  selectSegment(): weighted descriptor distance + match/dir probs
+  outlet 0 → buffer_manager.js → slot_router.js → karma~
+        │
+        ▼
+[sdj-tui.js]                            Stage 5 — Control Surface
+  Live descriptor display, BPM, LUFS, slice position, tension arrows
+  Commands: :bars 2  :pitchShift melody 3  :bake
+  Cricket (Ollama LLM): natural language → engine commands
 ```
 
 ---
@@ -104,333 +108,250 @@ Drop audio file
 ## 3. Stage 1 — Ingestion
 
 ### `watch_demucs.py`
-**Location:** `EBYS_INFRA/watch_demucs.py`
-**Type:** Python daemon, runs as LaunchAgent
+**Location:** `EBYS_INFRA/watch_demucs.py` | **Type:** Python daemon (LaunchAgent)
 
-The entry point for all new audio. Uses `watchdog` to monitor `raw_uploads/`. When a new audio file appears:
-1. Calls Demucs (`htdemucs` model) to separate into 4 stems: vocals, drums, bass, other (melody)
-2. Places stems in `stems/htdemucs/<TrackName>/` with naming convention `<TrackName>_vocals.wav` etc.
-3. Calls `genre_tagger.py` on the **original** mix file (not stems — the model needs the full mix)
-4. Calls `madmom_tagger.py` on the original mix for downbeat/BPM detection
-5. Reports progress at each stage via POST to `ws_server.js /progress` → broadcasts to TUI as `pipelineStage` events
-6. Writes `stream.txt` listing all new stem paths → signals Max to start analysis
+Entry point for all new audio. Uses `watchdog` to monitor `raw_uploads/`. On new file:
 
-Uses two separate Python environments: `demucs_env` (Python 3.14, has torch) for Demucs, and a system Python 3.10/3.11 (has essentia + madmom) for analysis — these are incompatible with the same Python version.
+1. Runs Demucs (`htdemucs`) → 4 stems in `stems/htdemucs/<Track>/` named `<Track>_vocals.wav` etc.
+2. Runs `genre_tagger.py` on the original mix
+3. Runs `madmom_tagger.py` on the original mix
+4. POSTs `pipelineStage` progress events to `/progress` → TUI receives them via WebSocket
+5. Writes `stream.txt` with all stem paths → triggers FluCoMa analysis in Max
+6. POSTs `stemsReady` to `/progress` (Max receives this; groundwork for replacing stream.txt polling)
+7. Calls `_run_import_library()` → imports updated genres + downbeats into `ebys.db`
+
+At startup, also runs `analyze_missing_tracks()` (genres + madmom on any existing stems not yet in their JSON files) and `_run_import_library()` to populate `ebys.db` from existing JSON.
+
+Uses two separate Python environments: `demucs_env/` (Python 3.14, torch) for Demucs; system Python 3.10/3.11 (essentia + madmom) for analysis — the two are version-incompatible.
 
 ### `genre_tagger.py`
 **Location:** `EBYS_INFRA/genre_tagger.py`
-**Type:** Python script (called by watch_demucs.py or standalone)
 
-Classifies a track's genre using Essentia + Discogs-EffNet neural net (400 genre classes). Writes results to `genres.json` with top-N genre labels and confidence scores. Always runs on the original mix, not stems, because isolated stems lack the harmonic/rhythmic context the model needs.
+Classifies genre using Essentia + Discogs-EffNet (400 classes). Always runs on the original mix, never on stems — the model needs harmonic/rhythmic context the model was trained on. Writes top-N genres + confidence to `genres.json`.
 
 ### `madmom_tagger.py`
 **Location:** `EBYS_INFRA/madmom_tagger.py`
-**Type:** Python script (called by watch_demucs.py or standalone)
 
-Uses madmom's `DBNDownBeatTrackingProcessor` to detect:
-- Time signature (meter: 2, 3, or 4)
-- BPM
-- Downbeat timestamps in ms (first beat of every bar)
-- Confidence score (1.0 = perfectly regular grid)
+Uses madmom's `DBNDownBeatTrackingProcessor` on the original mix:
+- Time signature (meter 2/3/4), BPM, average bar duration
+- Downbeat timestamps in ms (bar 1 of each bar), confidence score
 
-Output goes to `downbeats.json`. slicer.js uses downbeats to align slice selection to musical bar boundaries (the "downbeat snap" feature).
+Output → `downbeats.json`. `slicer.js` uses this to snap segment starts to the nearest bar boundary. Requires Python ≤ 3.11.
 
-Requires Python ≤ 3.11 (madmom won't compile on 3.12+).
+### `import_library.py`
+**Location:** `EBYS_INFRA/import_library.py`
 
-### `send_to_max.py`
-**Location:** `EBYS_INFRA/send_to_max.py`
-**Type:** Legacy Python polling script
+Imports all EBYS JSON files into `ebys.db` (SQLite). Schema:
 
-Older approach: polls `stems/htdemucs/` every 500ms and writes a flat `stream.txt` listing all `.wav` paths with their stem type. `streamWatcher.js` in Max detects changes and triggers analysis. Mostly superseded by `watch_demucs.py`, but the stream.txt mechanism is still used.
+```
+tracks    (id, name, bpm, bpm_confidence, key, meter, stem_dur_ms)
+slices    (id, track_id, stem, slice_key, time_frac, C,S,E,F,P,H,T, M0–M5,
+           tension_C/E/F/P/H/T)
+genres    (track_id, rank, genre, confidence)
+downbeats (track_id, bar_num, timestamp_ms)
+```
 
-### `rename_stems.py`
-**Location:** `EBYS_INFRA/rename_stems.py`
-**Type:** Utility script (one-shot)
+All writes are idempotent (`INSERT ... ON CONFLICT DO UPDATE`). WAL mode enabled. Can be run standalone:
 
-Early migration script. Renames `drums.wav` → `<SongFolder>_drums.wav` inside each htdemucs subfolder. Only needed when migrating from the flat naming convention Demucs originally used to the prefixed convention EBYS requires.
+```bash
+python3 import_library.py              # full import
+python3 import_library.py --track "My Track"
+python3 import_library.py --status    # print row counts
+```
 
-### `scan_stems.py` / `debug_stems.py`
-**Location:** `EBYS_INFRA/`
-**Type:** Diagnostic utilities
-
-Simple utilities to list all stems found in `htdemucs/` and print them as JSON (`scan_stems.py`) or just pretty-print folder contents (`debug_stems.py`). Used during setup/debugging.
+Called automatically by `watch_demucs.py` after each pipeline run and at startup. Also called by `add_tension.py` via `sync_tension()` after computing tension fields. SQLite stays Python-only for now — `slice_writer.js` runs inside Max's JS engine which has no SQLite bindings.
 
 ---
 
 ## 4. Stage 2 — Analysis
 
 ### `ebys-analyze.maxpat`
-**Location:** `EBYS_INFRA/MAX/ebys-analyze.maxpat`
-**Type:** Max/MSP patch (JSON format)
+**Location:** `EBYS_INFRA/MAX/ebys-analyze.maxpat` | **Type:** Main Max/MSP patch
 
-The main Max patch. Contains all wiring between JS objects, FluCoMa objects, buffer~ objects, and audio engine. Key subsystems inside it:
-- **FluCoMa analysis chain**: `fluid.bufonsetslice~` → `fluid.bufstats~` → `fluid.bufpitch~` → `fluid.bufmfcc~` → `fluid.bufchroma~`
-- **Buffer architecture**: `src_0/1_*` (full track disk buffers), `ring_0/1_*` (short segment copy buffers), `snap_*` (bake snapshot buffers)
-- **Audio engine**: `karma~` per stem (looping buffer player), `pfft~`/`gizmo~` for pitch shifting
-- **Node.js objects**: `node.script ws_server.js`, `node.script cricket.js`
-- **JS objects**: all the `.js` files listed below
-
-### `ebys-pitch.maxpat`
-**Location:** `EBYS_INFRA/MAX/ebys-pitch.maxpat`
-**Type:** Max sub-patch
-
-Encapsulated pitch analysis patch, used as a bpatcher for the pitch FluCoMa chain.
+Contains all wiring between JS objects, FluCoMa, buffers, and audio engine:
+- **FluCoMa chain**: `fluid.bufonsetslice~` → `fluid.bufstats~` → `fluid.bufpitch~` → `fluid.bufmfcc~` → `fluid.bufchroma~`
+- **Buffers**: `src_0/1_*` (full-length source files), `ring_0/1_*` (short segment copies), `snap_*` (bake snapshots)
+- **Audio engine**: `karma~` per stem (variable-speed looping), `pfft~`/`gizmo~` (pitch shift per stem)
+- **Node objects**: `node.script ws_server.js`, `node.script cricket.js`
 
 ### `streamWatcher.js`
-**Location:** `EBYS_INFRA/MAX/streamWatcher.js`
-**Type:** Max JS object (`js streamWatcher.js`)
+**Location:** `EBYS_INFRA/MAX/streamWatcher.js` | **Type:** Max JS object
 
-Polls `stream.txt` every 1 second. When the file content changes (new stems appeared), it bangs outlet 0 → triggers the analysis counter in the patch to start processing. Replaces Max's unreliable `filewatch` for paths outside the Max search path.
+Polls `stream.txt` every 1s. On change, bangs outlet 0 → triggers the analysis counter → `analyze_reader.js` starts FluCoMa on the next batch of stems.
 
 ### `analyze_reader.js`
-**Location:** `EBYS_INFRA/MAX/analyze_reader.js`
-**Type:** Max JS object (`js analyze_reader.js`)
+**Location:** `EBYS_INFRA/MAX/analyze_reader.js` | **Type:** Max JS object
 
-Reads the FluCoMa `buf~` output buffers after FluCoMa finishes processing a stem. Iterates every analysis frame (one per onset slice), extracts descriptors (C, E, F, P, H, M0–M5), and sends them to `slice_writer.js` via outlet 0. Manages the multi-track analysis loop: batches of 4 stems (one track), advances a Max counter to trigger FluCoMa on the next stem, moves to the next batch when done.
-
-Also loads `analysis_library.json` into the `analysisLib` dict at startup (triggered by the dict's outlet 1 wire → loadRegistry message) so that previously analyzed tracks are available immediately without re-analysis.
+Reads FluCoMa `buf~` output after each stem finishes. Iterates analysis frames (one per onset slice), extracts C/S/E/F/P/H/M0–M5, sends to `slice_writer.js`. Manages the multi-track loop: 4 stems per batch, advances a Max counter to trigger FluCoMa on the next stem. Loads `analysis_library.json` into `analysisLib` dict at startup so already-analyzed tracks skip re-analysis.
 
 ### `slice_writer.js`
-**Location:** `EBYS_INFRA/MAX/slice_writer.js`
-**Type:** Max JS object (`js slice_writer.js`)
+**Location:** `EBYS_INFRA/MAX/slice_writer.js` | **Type:** Max JS object
 
-Receives per-slice descriptor values from `analyze_reader.js` and writes them into the `analysisLib` Max dict using `replace` messages. Also handles:
-- **Key detection**: Krumhansl-Schmuckler algorithm on accumulated pitch values → `metadata::key`
+Receives per-slice descriptors from `analyze_reader.js`, writes into the `analysisLib` Max dict. Handles:
+- **Key detection**: Krumhansl-Schmuckler on accumulated pitch values → `metadata::key`
 - **BPM/confidence metadata** per stem
-- **Persistence**: writes all dict data to `analysis_library.json` on disk after each track completes
-- **Deduplication**: `trackExists` message checks if a track is already in the library before re-analyzing
+- **Deduplication**: `trackExists` check before re-analyzing
+- **Persistence**: writes `analysis_library.json` after each track completes
+
+Runs inside Max's SpiderMonkey JS engine — cannot use Node.js APIs or SQLite.
 
 ### `add_tension.py`
-**Location:** `EBYS_INFRA/add_tension.py`
-**Type:** Offline Python post-processor
+**Location:** `EBYS_INFRA/add_tension.py` | **Type:** Offline post-processor
 
-Adds `tension_C/E/F/P/H/T` fields to every slice in `analysis_library.json`. Process:
-1. Assigns each slice to its musical bar using `downbeats.json`
-2. Averages all descriptors per bar
-3. Computes a sliding-window slope (default window = 4 bars)
-4. Normalizes slopes to [0,1]
-5. Writes back to `analysis_library.json`
+Adds `tension_C/E/F/P/H/T` to every slice in `analysis_library.json`:
+1. Assign each slice to a bar via `downbeats.json`
+2. Average all descriptors per bar
+3. Sliding-window slope across bars (default window = 4 bars)
+4. Normalize slopes to [0, 1]
+5. Write back to `analysis_library.json`
+6. If `ebys.db` exists, call `sync_tension()` from `import_library.py` to update only the tension columns — no full reimport
 
-Tension values let slicer.js build towards or away from musical climaxes. Run manually after adding new tracks.
-
-### `asset_id.js`
-**Location:** `EBYS_INFRA/MAX/asset_id.js`
-**Type:** Max JS object
-
-Generates unique IDs for stem families. Given a filename (e.g. `DREPTO_CE3o.wav`) it produces `DREPTO_CE3o_1`, `_2`, etc. for each stem. Used during ingestion to assign stable asset IDs before analysis. Mostly legacy from an earlier architecture.
-
-### `folder_scanner.js` / `scanner.js`
-**Location:** `EBYS_INFRA/MAX/folder_scanner.js`, `scanner.js`
-**Type:** Max JS objects
-
-File system utilities. `folder_scanner.js` scans a flat folder for audio files (wav/aif/mp3) and outputs each filename. `scanner.js` is a recursive version that walks subdirectories and outputs full paths. Both are used during setup and analysis routing within the patch.
-
-### `classifier.js`
-**Location:** `EBYS_INFRA/MAX/classifier.js`
-**Type:** Max JS object
-
-Simple stem type classifier: given a file path, routes it to the `drums` or `instruments` outlet based on the filename (looks for "drums", "bass", "other", "vocals"). Legacy routing helper from before the current naming convention was stable.
-
-### `bpm_from_tempogram.js`
-**Location:** `EBYS_INFRA/MAX/bpm_from_tempogram.js`
-**Type:** Max JS object — **DEPRECATED**
-
-Written to extract BPM from a `fluid.buftempogram~` buffer. Marked deprecated because `fluid.buftempogram~` doesn't exist in FluCoMa. BPM detection now handled by `madmom_tagger.py`.
-
-### `stems.js`
-**Location:** `EBYS_INFRA/MAX/stems.js`
-**Type:** Max JS object stub
-
-Contains only `post("JS OBJECT WORKS\n")`. Placeholder from an early development stage.
+```bash
+python3 add_tension.py                 # all tracks
+python3 add_tension.py "My Track"     # one track
+python3 add_tension.py --window 6     # wider smoothing window
+```
 
 ---
 
 ## 5. Stage 3 — Index Building
 
 ### `ws_server.js`
-**Location:** `EBYS_INFRA/MAX/ws_server.js`
-**Type:** Max Node.js object (`node.script ws_server.js`)
+**Location:** `EBYS_INFRA/MAX/ws_server.js` | **Type:** N4M Node.js object (`node.script ws_server.js`)
 
-The central nervous system of EBYS. Bridges Max and the outside world (TUI, Cricket) over WebSocket on port 8080. Major responsibilities:
+The central nervous system. Bridges Max ↔ TUI (WebSocket :8080) and owns index building.
 
-**WebSocket server**: accepts connections from TUI clients. On first connect, sends downbeats (chunk stream) and the cached `ebys_index.json` (if valid).
+**Boot sequence**: on startup sends `downbeats.json` and the cached `ebys_index.json` to `slicer.js` as hardened chunk streams. If `analysis_library.json` is non-empty, sets `analysisDone = true` so new TUI clients know analysis is complete.
 
-**buildIndex** (triggered by TUI after analysis completes):
-1. `prepareLibraryDict()`: reads `analysisLib` dict from Max (sent as chunked JSON via `libchunk` outlet), parses it, caches it in memory
-2. Sends `analysis_library.json` in 2048-char chunks to slicer.js via `libchunk` outlet
-3. After 500ms (FluCoMa buffers settle), calls `computeAndWriteUMAP()`
-4. `buildIndexInProgress` guard flag prevents duplicate builds
+**buildIndex flow** (triggered by TUI command):
+1. `buildIndexInProgress` guard prevents duplicate runs
+2. `prepareLibraryDict()`: reads `analysis_library.json` via Node (no 32KB limit), caches in memory
+3. Sends library (stream 3) + genres (stream 4) to slicer.js in 2KB chunks
+4. After 500ms (FluCoMa settle time), calls `computeAndWriteUMAP()`
 
 **computeAndWriteUMAP()**:
-1. Synchronously extracts 6-D features (C, E, F, P, H, T) per slice per stem
-2. Writes `stem_ranges.json` immediately (no blocking)
-3. Spawns `tsne_worker.js` via Worker thread (non-blocking, keeps WebSocket alive)
-4. On worker result: writes `umap_coords.json`, broadcasts `umapDone`, resets guard flag
+1. Extracts C/E/F/P/H/T feature vectors per slice per stem from cached library
+2. Writes `stem_ranges.json` (descriptor min/max, used for TUI bar scaling)
+3. Spawns `tsne_worker.js` as a child process via `spawn()` — communicates over stdin/stdout JSON to avoid N4M's IPC interception (see tsne_worker.js note below)
+4. On child exit: parses stdout JSON → writes `umap_coords.json`, broadcasts `umapDone`
 
-**Real-time telemetry**: relays `desc`, `seg`, `meter`, `state`, `slices`, `param`, `beats` messages from Max to TUI via WebSocket broadcast.
+**HTTP endpoint**: `POST /progress` — `watch_demucs.py` sends pipeline stage events here; ws_server broadcasts them to all TUI clients.
 
-**Slice command relay**: relays `vocals/melody/bass/drums` play commands and `pitchShift` from TUI to Max outlets.
+**Chunk protocol**: all chunk sends use a `streamId` counter (increments per send). Format: `label  streamId  chunkIndex  total  data`. Receivers reset and warn on stream ID change, and skip duplicate chunk indexes. This prevents silent corruption when two sends interleave (e.g., rapid buildIndex calls).
 
-**Chunk reassembly** (`saveIdxChunk`): receives `ebys_index.json` from slicer.js in 2048-char chunks and saves to disk.
+**Chunk streams sent by ws_server** (all via Max outlet):
+- `downbeatchunk` → slicer.js at boot
+- `idxchunk` → slicer.js at boot (cached index)
+- `libchunk` → slicer.js on buildIndex
+- `genrechunk` → slicer.js on buildIndex
+
+**saveIdxChunk handler**: receives `ebys_index.json` back from slicer.js in 2KB chunks, reassembles, writes to disk.
 
 ### `tsne_worker.js`
-**Location:** `EBYS_INFRA/MAX/tsne_worker.js`
-**Type:** Node.js Worker thread (spawned by ws_server.js)
+**Location:** `EBYS_INFRA/MAX/tsne_worker.js` | **Type:** Node.js child process (spawned by ws_server.js)
 
-Runs t-SNE in a separate thread so the ~5-second computation doesn't block the Node.js event loop (which would cause WebSocket ping timeouts → TUI reconnect → duplicate `buildIndex`).
+Runs t-SNE in a separate process so the ~5s computation doesn't block the event loop (which would drop WebSocket connections and trigger duplicate buildIndex).
 
-Receives `workerData.stems` — an array of `{ stem, ids, features, nIter }`. For each stem, runs a full t-SNE implementation (perplexity-based bandwidth search, symmetric P matrix, gradient descent with momentum). Posts results back as `{ [stem]: { coords: { [id]: [x, y] }, ms } }`.
+**IPC via stdin/stdout** (not fork/IPC): N4M is itself a child process of Max and uses `process.send()` / `process.on('message')` for its own Max↔Node IPC. Using `child_process.fork()` causes N4M to intercept and corrupt the IPC channel. `spawn()` with stdio pipes is invisible to N4M.
 
-The t-SNE result is `umap_coords.json` — 2D coordinates for every slice, used by the TUI spatial navigator.
+Receives `{ stems: [{ stem, ids, features, nIter }] }` as JSON on stdin. For each stem runs full t-SNE: perplexity-based bandwidth search, symmetrized P matrix, gradient descent with momentum and adaptive gains. Writes `{ [stem]: { coords: { [sliceId]: [x, y] }, ms } }` to stdout via `process.stdout.end()` (not `write()` + `exit()` — large JSON >64KB would be truncated if the process exits before the pipe drains).
 
 ### `slicer.js`
-**Location:** `EBYS_INFRA/MAX/slicer.js`
-**Type:** Max JS object (`js slicer.js`) — the musical brain
+**Location:** `EBYS_INFRA/MAX/slicer.js` | **Type:** Max JS object — the sequencing brain
 
-Receives the full `ebys_index.json` (via `idxchunk` messages) and `downbeats.json` (via `downbeatchunk` from ws_server). After assembly, `buildIndex()` runs:
-- Parses all slices, groups by stem type (`byTrack`)
-- For each source track, loads downbeat data from `trackDownbeats`
-- Builds candidate pools per stem: slices near downbeat positions go into `aligned[]`, others into `free[]`
+Owns all musical decisions. No DSP access.
 
-**Slice selection** (`pickNext()`): weights candidates by Euclidean distance in descriptor space (C, E, F, P, H, T), filtered by match probabilities and directional preferences. Returns a slice index.
+**Chunk accumulation**: receives `libchunk`, `genrechunk`, `downbeatchunk`, `idxchunk` streams from ws_server. Each accumulator tracks `streamId` — resets with a warning log on stream change, ignores duplicate chunk indexes. `buildIndex` is deferred if chunks are still arriving (`libChunkBuf !== null`).
 
-**Sequencer** (`metro` callback): at each tick, calls `pickNext()` per stem, sends play command to `buffer_manager.js` with `sourceSlot, startFrac, endFrac, stretchRatio, segDurMs`.
+**buildIndex()**: parses library, groups slices by stem and source track, computes end-descriptors and delta values per slice, snaps candidate starts to downbeat grid. Writes result back to ws_server via `saveIdxChunk` stream (with its own incrementing `saveIdxStreamId`).
 
-**Parameters received from TUI** (via route → slicer inlet): `setWeight`, `setMatchProb`, `setDirPref`, `setDirWeight`, `setStayProb`, `setSegmentBars`, `setQuantize`, `setFallbackBPM`, `setTrackWeight`, `start`, `stop`, `selectSegment`.
+**selectSegment(track)**: builds a candidate pool of bar-aligned slices (from `trackDownbeats`), then either:
+- Stays on the same segment (STAY_PROB chance)
+- Scores all candidates by `scoreCandidate()` (transition match + directional preference)
+- Or picks randomly
 
-**Telemetry emitted** (outlet 1 → ws_server): `desc` (current slice descriptors), `seg` (slice position info), `slices` (pool sizes).
+Emits outlet 0: `track  slot  startFrac  endFrac  stretchRatio  segDurMs`
+
+**Parameters** (from TUI via ws_server → Max route → slicer inlet 0): `setSegmentBars`, `setStayProb`, `setQuantize`, `setMatchProb`, `setDirPref`, `setDirWeight`, `setGlobalBPM`, `setFallbackBPM`, `setGenreFilter`, `setKeyFilter`, `setWeight`, `loop`, `unloop`, `followStem`, `start`, `stop`, `next`, `buildIndex`, `reset`.
+
+**Telemetry** (outlet 1 → ws_server → TUI): `desc` (C/S/E/F/P/H/T + tension values), `seg` (slice id, duration, startFrac/endFrac), `stemTrack`, `slice_ms`, `slices` (pool sizes).
 
 ---
 
 ## 6. Stage 4 — Playback Engine
 
 ### `buffer_manager.js`
-**Location:** `EBYS_INFRA/MAX/buffer_manager.js`
-**Type:** Max JS object (`js buffer_manager.js`)
+**Location:** `EBYS_INFRA/MAX/buffer_manager.js` | **Type:** Max JS object
 
 Two-level buffer architecture for zero-glitch multi-track playback:
 
-**Level 1 — src buffers** (`src_0/1_voc/drm/bss/mel`, 8 total): full-length audio files loaded from disk. Two slots per stem enable crossfading between tracks without re-reading from disk.
+**Level 1 — src buffers** (`src_0/1_voc/drm/bss/mel`, 8 total): full-length WAV files loaded from disk. Two slots per stem enable switching tracks without re-reading.
 
-**Level 2 — ring buffers** (`ring_0/1_voc/drm/bss/mel`, 8 total): short pre-allocated buffers. `fluid.bufcompose~` copies the exact segment from the active src buffer into a ring buffer in ~1ms — much faster than reading from disk.
+**Level 2 — ring buffers** (`ring_0/1_voc/drm/bss/mel`, 8 total): short pre-allocated buffers. `fluid.bufcompose~` copies the exact segment from src into a ring buffer in ~1ms (much faster than disk reads).
 
-**Playback flow per stem**: `vocals sourceSlot startFrac endFrac stretchRatio segDurMs` arrives → find src slot → if not loaded, load it → `triggerCompose()` → `fluid.bufcompose~` copies segment → `ring_done` callback → swap ring active/staging → send `vocals ringSlot segDurMs stretchRatio` to `slot_router.js`.
+**Flow**: `track  slot  startFrac  endFrac  stretchRatio  segDurMs` → load src if needed → `triggerCompose()` → `fluid.bufcompose~` copies segment → `ring_done` callback → swap active/staging → send `track  ringSlot  segDurMs  stretchRatio` to `slot_router.js`.
 
-**Bake snapshot**: `bakeSnapshot()` copies `ring_active → snap_` for all stems. `bakeRestore()` copies back. Ensures every training loop attempt starts from identical audio.
-
-**Slot→track map**: populated by `sourceTrack slotIdx ...nameParts` messages from `slicer.js`.
+**Bake snapshot**: `bakeSnapshot()` copies `ring_active → snap_*` for all stems. `bakeRestore()` copies back. Every training loop iteration starts from identical audio.
 
 ### `slot_router.js`
-**Location:** `EBYS_INFRA/MAX/slot_router.js`
-**Type:** Max JS object (`js slot_router.js`)
+**Location:** `EBYS_INFRA/MAX/slot_router.js` | **Type:** Max JS object — audio engine hub
 
-The only object that sends messages directly to `karma~` and `pfft~`/`gizmo~`. Owns all DSP parameters.
+The only object that sends messages to `karma~` and `pfft~`/`gizmo~`. Two independent axes:
 
-Receives `vocals ringSlot segDurMs stretchRatio` from `buffer_manager.js`:
-- Sends `set ring_N_voc` to `karma~` (switch which buffer to play)
-- Sends `seek 0` to `karma~` (start from beginning)
-- Sends `delayMs` to the delay~ object (fires the next segment's pick)
-- Sends `speedFactor = 1/stretchRatio` to `karma~`'s speed inlet (tape-style tempo stretch)
+**Tempo axis** (via karma~): `speedFactor = 1/stretchRatio` → `karma~` right inlet. When `GLOBAL_BPM` is set, slicer computes `stretchRatio = srcBPM / globalBPM`; slot_router converts to speed. Pitch follows speed (tape-style stretch).
 
-**Pitch axis** (independent of tempo): `setPitch stem ratio` or `setPitchSemitones stem n` sends a frequency ratio to `pfft~`/`gizmo~` per stem. Pitch shift doesn't affect playback duration.
-
-### `stretch_player.js`
-**Location:** `EBYS_INFRA/MAX/stretch_player.js`
-**Type:** Max JS object — **superseded**
-
-Earlier approach to time-stretching using `fluid.bufselect~` → `fluid.bufstretch~` → `play~` chain. Replaced by the ring buffer + karma~ architecture. Kept for reference.
-
-### `track_loader.js`
-**Location:** `EBYS_INFRA/MAX/track_loader.js`
-**Type:** Max JS object — **superseded**
-
-Older multi-track loader. The `play_*` buffer naming convention was replaced by `src_*` + `ring_*` in the ring buffer upgrade; `buffer_manager.js` now handles this. Kept for reference.
-
-### `bake_manager.js`
-**Location:** `EBYS_INFRA/MAX/bake_manager.js`
-**Type:** Max JS object (`js bake_manager.js`)
-
-Handles the training snapshot system for the `:bake` workflow. `bakeSnapshot()` copies all ring buffers to snap buffers at `:bake` start. `bakeRestore()` copies back at every loop reset. Guarantees every training iteration starts from identical audio so the model only sees the effect of command changes, not audio drift.
-
-### `clear_stems.js`
-**Location:** `EBYS_INFRA/MAX/clear_stems.js`
-**Type:** Max JS object
-
-Deletes all `.wav` files from the stems folder. One-shot utility for resetting the stems library during development.
+**Pitch axis** (via pfft~/gizmo~): `setPitch stem ratio` or `setPitchSemitones stem n` → frequency ratio to `pfft~`/`gizmo~`. Pitch shift is independent of tempo — gizmo~ acts on the FFT frames without changing duration.
 
 ---
 
 ## 7. Stage 5 — AI Brain (Cricket)
 
 ### `cricket.js`
-**Location:** `EBYS_INFRA/MAX/cricket.js`
-**Type:** Max Node.js object (`node.script cricket.js`)
+**Location:** `EBYS_INFRA/MAX/cricket.js` | **Type:** N4M Node.js object
 
-EBYS's AI personality. Bridges Max to a locally running Ollama LLM (default: `llama3.1:latest`).
-
-Receives `ask <text>` from Max. Sends to Ollama `/api/chat` with a detailed system prompt describing: what Cricket is (a dry, present DJ personality), all engine parameters and their effect, a translation guide (e.g. "sparse → setSegmentBars 8, setStayProb 0.5"), and how to mix prose and commands in the same response.
-
-Ollama returns text. `cricket.js` parses each line: lines that look like engine commands are emitted as Max atoms via outlet 0 → `route` object → correct parameter handler. Prose lines are also emitted for the TUI to display as Cricket's speech.
-
-### `TUI/cricket-voice.js`
-**Location:** `EBYS_INFRA/TUI/cricket-voice.js`
-**Type:** Standalone Node.js script
-
-Training session tool for building Cricket's voice. Everything you type is saved to `voice_samples.md`. Commands: `:bake` distills samples into `voice.md`, `:rule "..."` adds a behavioral rule, `:bakefranglais` bakes Q&A examples into an Ollama Modelfile. Not used during live performance.
-
-### `TUI/test-ollama.js`
-**Location:** `EBYS_INFRA/TUI/test-ollama.js`
-**Type:** Standalone Node.js diagnostic script
-
-Quick Ollama connectivity test. Lists available models and sends a test message. Prints which model string to use in `sdj-tui.js`.
+Bridges Max to a local Ollama LLM (`llama3.1:latest` by default). Receives `ask <text>` from Max, POSTs to Ollama `/api/chat` with a system prompt encoding Cricket's personality, descriptor meanings, command vocabulary, and translation examples (e.g., "sparse → setSegmentBars 8, setStayProb 0.5"). Parses the response: command lines → Max outlet 0 → route → parameter handlers; prose lines → TUI display.
 
 ### `convert_bakes.py`
 **Location:** `EBYS_INFRA/convert_bakes.py`
-**Type:** Python script
 
-Converts `training_log.jsonl` (raw `:bake` snapshots from live sessions) into `cricket_finetune.jsonl` (MLX/Llama fine-tuning format). Each bake becomes one training example: intent + live descriptor state → final engine commands.
+Converts `training_log.jsonl` (raw `:bake` snapshots: intent + Cricket cmds + user corrections + live descriptor state) into `cricket_finetune.jsonl` (MLX/Llama instruction-response format).
 
 ### `finetune.sh`
 **Location:** `EBYS_INFRA/finetune.sh`
-**Type:** Shell script
 
-End-to-end fine-tuning pipeline for Cricket on Apple Silicon using MLX LoRA. Converts bakes, runs `mlx_lm.lora` (batch=1, 8 layers, 600 iters), saves adapter to `cricket_lora/`. Requires 200+ bakes. Takes 1–3 hours.
+LoRA fine-tune on Apple Silicon via `mlx-lm` (batch=1, 8 layers, 600 iters). Requires 200+ bakes. Produces Cricket model tuned to your specific library and taste. Runs offline, no data leaves the machine.
 
 ---
 
 ## 8. Stage 6 — Terminal UI (TUI)
 
 ### `TUI/sdj-tui.js`
-**Location:** `EBYS_INFRA/TUI/sdj-tui.js`
-**Type:** Standalone Node.js app (`node sdj-tui.js`)
-**Dependencies:** `blessed` (terminal UI), `ws` (WebSocket)
+**Location:** `EBYS_INFRA/TUI/sdj-tui.js` | **Type:** Standalone Node.js app
+**Dependencies:** `blessed` (terminal layout), `ws` (WebSocket client)
 
-The control surface for EBYS. A rich terminal dashboard showing live descriptor readouts per stem (C, S, E, F, P, H, T) with trend arrows, slice position bar, segment duration, BPM, key, mix loudness (LUFS, dBFS), and active genre label.
+Terminal dashboard: live C/S/E/F/P/H/T per stem with tension direction arrows (↑─↓), slice position bar, segment zone, BPM, key, LUFS/dBFS, genre label, novelty sparkline per stem.
 
-Connects to `ws_server.js` on port 8080. On connect, sends `buildIndex` if analysis is done. Reconnects every 3s on disconnect.
+Connects to ws_server :8080. On connect: sends `buildIndex` if `analysisDone` flag is set. Auto-reconnects every 3s.
 
-**Command input**: user types commands sent to Max via WebSocket:
-- `:bars 2` → `setSegmentBars 2` → slicer.js
-- `:pitchShift melody 3` → slot_router.js
-- `:bake` → saves snapshot to `training_log.jsonl`
-- Natural language → sent to Cricket (Ollama) → engine commands back
+Command input is parsed locally: recognized commands (`:bars`, `:pitchShift`, `:loop`, etc.) are sent directly as WebSocket messages. Unrecognized input goes to Cricket (Ollama) which responds with prose + engine commands.
 
 ---
 
 ## 9. Data Files Reference
 
 ### `analysis_library.json`
-**Location:** `EBYS_INFRA/MAX/` | **Size:** ~1MB
-**Written by:** `slice_writer.js` | **Read by:** `ws_server.js`, `analyze_reader.js`
+**Location:** `MAX/` | **Size:** ~1MB | **Written by:** `slice_writer.js` | **Read by:** `ws_server.js`
 
-Raw FluCoMa analysis output. One entry per stem file. Structure:
+Raw FluCoMa output. One top-level key per stem file:
 ```json
 {
-  "<TrackName>_vocals.wav": {
+  "TrackName_vocals.wav": {
     "vocals": {
-      "metadata": { "track_name": "...", "BPM": 128, "BPM_confidence": 0.91, "key": "C major" },
+      "metadata": { "BPM": 128, "BPM_confidence": 0.91, "key": "Am", "stemDurMs": 139020 },
       "slices": {
-        "slice_0001": { "time": 0.023, "C": 2300, "E": -24.1, "F": 0.42, "P": 440, "H": 0.7, "M0": "...", "M5": "..." }
+        "slice_0001": { "time": 0.023, "C": 2300, "E": -24.1, "F": 0.42,
+                        "P": 440, "H": 0.7, "M0": 12.1, "M5": 3.2,
+                        "tension_C": 0.71, "tension_E": 0.45, ... }
       }
     }
   }
@@ -438,60 +359,44 @@ Raw FluCoMa analysis output. One entry per stem file. Structure:
 ```
 
 ### `ebys_index.json`
-**Location:** `EBYS_INFRA/MAX/` | **Size:** ~2.8MB
-**Written by:** `slicer.js` (via saveIdxChunk → ws_server.js) | **Read by:** `ws_server.js`
+**Location:** `MAX/` | **Size:** ~2.8MB | **Written by:** `ws_server.js` (reassembled from slicer saveIdxChunk)
 
-The pre-built slice database. Extends `analysis_library.json` with computed fields: UMAP 2D coordinates, tension values (tC, tE, tF, tP, tH, tT), genre tags, sourceTrack name per slice, delta values. This is what slicer.js indexes for fast lookup — rebuilding takes ~10s, so it's cached and only rebuilt when new tracks are added. It is **larger** than `analysis_library.json` because it adds derived fields, not compresses them.
+Pre-built slice database: `{ meta, byTrack, ranges }`. `byTrack[stem]` is a flat array of fully hydrated slice objects (with slot, sourceTrack, dur, endC/E/F/P/H/T, deltaC/E/F/P/H/T, genres, tension_*). Cached on disk so slicer.js has it immediately at boot without a full rebuild.
 
 ### `downbeats.json`
-**Location:** `EBYS_INFRA/` (NOT in MAX/)
-**Written by:** `madmom_tagger.py` | **Read by:** `ws_server.js` → `slicer.js`
+**Location:** `EBYS_INFRA/` | **Written by:** `madmom_tagger.py` | **Read by:** `ws_server.js` → slicer.js
 
-Musical timing data per track. slicer.js uses this to classify slices as "near-downbeat" (→ `aligned[]` pool, preferred for transitions) or not (→ `free[]` pool). Keyed by source track name (e.g. `"DREPTO CE3o"`, not `"DREPTO CE3o_vocals.wav"`).
-
-### `umap_coords.json`
-**Location:** `EBYS_INFRA/MAX/`
-**Written by:** `ws_server.js` (from tsne_worker results) | **Read by:** `slicer.js`
-
-2D t-SNE coordinates for every slice per stem. Used by the TUI spatial navigator so similar-sounding slices cluster together visually.
-
-### `stem_ranges.json`
-**Location:** `EBYS_INFRA/MAX/`
-**Written by:** `ws_server.js` | **Read by:** `slicer.js`
-
-Descriptor min/max per stem. Used for normalizing values before UMAP display and for TUI descriptor bar scaling.
+Per track: `{ bpm, meter, avgBarMs, downbeats_ms: [...], confidence }`. Keyed by source track name (not stem filename). Confidence < 0.4 → slicer falls back to BPM grid instead of actual downbeat timestamps.
 
 ### `genres.json`
-**Location:** `EBYS_INFRA/`
-**Written by:** `genre_tagger.py` | **Read by:** `ws_server.js`, `sdj-tui.js`
+**Location:** `EBYS_INFRA/` | **Written by:** `genre_tagger.py` | **Read by:** `ws_server.js`, `sdj-tui.js`
 
-Genre classification results per track. Top-N genres with confidence scores from the Discogs-EffNet 400-class model.
+Per track: top-N genre strings + confidence from Discogs-EffNet 400-class model. Keyed by track name without extension.
 
-### `dict_analysis.json`
-**Location:** `EBYS_INFRA/MAX/`
+### `ebys.db`
+**Location:** `EBYS_INFRA/` | **Written by:** `import_library.py`, `add_tension.py`
 
-Manual debug export of the `analysisLib` Max dict. Not part of the automated pipeline.
+SQLite database — the canonical queryable store. WAL mode, foreign keys on. Tables: `tracks`, `slices` (full descriptor + tension columns), `genres`, `downbeats`. Populated incrementally by `watch_demucs.py` after each pipeline run and at startup. Tension columns updated independently by `add_tension.py` via `sync_tension()` (targeted UPDATE, no full reimport). Primary path for PD migration — PD will read from here instead of the JSON chain.
 
-### `ebys_feed_vocals.json`
-**Location:** `EBYS_INFRA/MAX/`
+### `umap_coords.json`
+**Location:** `MAX/` | **Written by:** `ws_server.js` (from tsne_worker stdout) | **Read by:** TUI
 
-Partial analysis export for the vocals stem only. Debug snapshot, not part of the main pipeline.
+2D t-SNE coordinates per stem per slice (`{ stem: { sliceId: [x, y] } }`). Used by TUI spatial navigator — similar-sounding slices cluster together.
 
-### `package.json` (MAX)
-**Location:** `EBYS_INFRA/MAX/` | **Dependencies:** `ws ^8.21.0`
+### `stem_ranges.json`
+**Location:** `MAX/` | **Written by:** `ws_server.js` | **Read by:** TUI
 
-Node.js manifest for Max-side scripts. `ws` is used by `ws_server.js` for the WebSocket server.
+Descriptor min/max per stem (`{ stem: { C: { min, max }, E: { min, max }, ... } }`). Used for descriptor bar scaling in the TUI.
 
-### `package.json` (TUI)
-**Location:** `EBYS_INFRA/TUI/` | **Dependencies:** `blessed ^0.1.81`, `ws ^8.21.0`
+### `stream.txt`
+**Location:** `EBYS_INFRA/` | **Written by:** `watch_demucs.py` | **Read by:** `streamWatcher.js`
 
-TUI Node.js manifest. `blessed` for the terminal UI, `ws` for the WebSocket client.
+Flat list of all current stem paths with labels, 4 lines per track (`vocals /path/...`, `drums /path/...`, etc.). Written after genre + madmom complete so FluCoMa starts with all metadata already on disk. `streamWatcher.js` polls this every 1s and bangs Max's analysis counter when the content changes.
 
-### `essentia_models/genre_discogs400_labels.json`
-**Location:** `EBYS_INFRA/essentia_models/`
-**Written by:** `extract_labels.py` or downloaded
+### `training_log.jsonl`
+**Location:** `EBYS_INFRA/` | **Written by:** `ws_server.js` on `:bake`
 
-The 400 genre class names for the Discogs-EffNet model. Without this, `genre_tagger.py` falls back to numeric class IDs.
+Append-only JSONL. One JSON object per bake: `{ timestamp, intent, cricket_cmds, user_corrections, final_cmds, track, bpm, stems }`. The correction delta between `cricket_cmds` and `final_cmds` is the training signal for Cricket fine-tuning.
 
 ---
 
@@ -499,117 +404,136 @@ The 400 genre class names for the Discogs-EffNet model. Without this, `genre_tag
 
 ### Patch Evolution Scripts (`patch_*.py`)
 
-These Python scripts directly edit `ebys-analyze.maxpat` (a JSON file) to add/remove/rewire objects without touching the Max GUI. Each creates a `.bak` before modifying.
+Python scripts that directly edit `ebys-analyze.maxpat` (JSON) without touching the Max GUI. Each creates a `.bak` before modifying.
 
 | Script | What it did |
 |---|---|
-| `patch_multitrack_upgrade.py` | Renamed `play_*` → `play_0_*`, added slot 1 buffers, wired `slot_router.js`, removed old route→unpack routing |
-| `patch_ring_buffer_upgrade.py` | Renamed `play_0/1_*` → `src_0/1_*`, added `ring_0/1_*` buffers, replaced `track_loader.js` with `buffer_manager.js` |
-| `patch_cleanup.py` | Removed 25 dead objects (orphaned unpack/*/- chains, label boxes) left after the multitrack upgrade |
-| `patch_tighten2/3/4.py` | UI tightening passes |
-| `patch_bake_snapshot.py` | Added bake snapshot wiring (snap_* buffers, bake_manager.js connections) |
+| `patch_multitrack_upgrade.py` | `play_*` → `play_0_*`, added slot 1 buffers, wired slot_router.js |
+| `patch_ring_buffer_upgrade.py` | `play_0/1_*` → `src_0/1_*`, added `ring_0/1_*` buffers, replaced track_loader with buffer_manager |
+| `patch_cleanup.py` | Removed 25 dead objects from the multitrack upgrade |
+| `patch_tighten2/3/4.py` | UI layout passes |
+| `patch_bake_snapshot.py` | Added snap_* buffers and bake_manager.js wiring |
 
-### `extract_labels.py`
-**Location:** `EBYS_INFRA/extract_labels.py`
+### Deprecated / Legacy JS Objects
 
-Attempts to extract the 400 genre class names from the Essentia `.pb` model files. Tries TensorFlow SignatureDef extraction, GitHub download, and class-count inference. Run once during setup.
-
-### `ai_edit_file.py` / `ai_readme.py`
-**Location:** `EBYS_INFRA/`
-
-Developer tools using local Ollama. `ai_edit_file.py` rewrites a text file with AI assistance (preview before overwrite). `ai_readme.py` opens a Q&A loop about the README. Neither is part of the EBYS runtime.
+| Object | Status | Notes |
+|---|---|---|
+| `stretch_player.js` | superseded | Earlier `fluid.bufstretch~` approach; replaced by ring buffer + karma~ |
+| `track_loader.js` | superseded | Replaced by `buffer_manager.js` |
+| `asset_id.js` | legacy | Stable ID generation from early architecture |
+| `bpm_from_tempogram.js` | deprecated | `fluid.buftempogram~` doesn't exist in FluCoMa; BPM from madmom now |
+| `stems.js` | stub | Placeholder only |
 
 ---
 
-## 11. System Services & DevTools
+## 11. System Services
 
 ### `com.ebys.watchdemucs.plist`
-**Location:** `EBYS_INFRA/com.ebys.watchdemucs.plist`
-**Type:** macOS LaunchAgent plist
+**Location:** `EBYS_INFRA/`
 
-Runs `watch_demucs.py` automatically at login and keeps it alive if it crashes. Install with:
+macOS LaunchAgent. Starts `watch_demucs.py` at login, restarts on crash. Logs to `EBYS_INFRA/logs/watchdemucs.log`.
+
 ```bash
 cp com.ebys.watchdemucs.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.ebys.watchdemucs.plist
 ```
-Logs to `EBYS_INFRA/logs/watchdemucs.log`.
 
 ---
 
-## 12. Archive / BAK Files
-
-Automatic backups created by the patch evolution scripts before each modification.
-
-| File | State captured |
-|---|---|
-| `EBYS_ANALYZE.maxpat.bak` | Generic most-recent backup |
-| `EBYS_ANALYZE.maxpat.pre_multitrack.bak` | Before multi-track upgrade (single-track era) |
-| `EBYS_ANALYZE.maxpat.pre_ringbuf.bak` | Before ring buffer upgrade (play_0/1_* era) |
-| `ebys-analyze.maxpat.pre_bake_snapshot.bak` | Before bake snapshot wiring |
-| `ebys-analyze.maxpat.pre_cleanup.bak` | Before dead object cleanup |
-| `ebys-analyze.maxpat.pre_tighten2/3/4.bak` | Before each UI tightening pass |
-| `UPLOAD_DMC.bpatcher.maxpat.bak` | Backup of the Demucs upload bpatcher |
-
----
-
-## Quick Reference: Who Talks to Whom
+## 12. Quick Reference: Who Talks to Whom
 
 ```
 watch_demucs.py
-  → writes: stems/htdemucs/<Track>/<Track>_*.wav
-  → writes: EBYS_INFRA/downbeats.json
-  → writes: EBYS_INFRA/genres.json
-  → writes: EBYS_INFRA/temp/stream.txt
-  → POSTs:  ws_server :8080/progress (pipeline stage updates)
+  → writes:  stems/htdemucs/<Track>/<Track>_*.wav
+  → writes:  EBYS_INFRA/genres.json
+  → writes:  EBYS_INFRA/downbeats.json
+  → writes:  EBYS_INFRA/stream.txt
+  → runs:    import_library.py  → EBYS_INFRA/ebys.db
+  → POSTs:   /progress  { pipelineStage, stemsReady }
 
 streamWatcher.js
-  → reads:  stream.txt (polls every 1s)
-  → bangs:  Max analysis counter → analyze_reader.js
+  → polls:   stream.txt every 1s
+  → bangs:   Max counter → analyze_reader.js
 
 analyze_reader.js
-  → reads:  FluCoMa buf~ objects in Max
-  → sends:  slice descriptors → slice_writer.js (outlet 0)
+  → reads:   FluCoMa buf~ objects in Max
+  → sends:   descriptors → slice_writer.js
 
 slice_writer.js
-  → writes: dict analysisLib (Max dict)
-  → writes: MAX/analysis_library.json
+  → writes:  dict analysisLib (Max)
+  → writes:  MAX/analysis_library.json
+
+add_tension.py
+  → reads:   MAX/analysis_library.json + EBYS_INFRA/downbeats.json
+  → writes:  MAX/analysis_library.json  (tension_* fields added)
+  → updates: EBYS_INFRA/ebys.db  (sync_tension — tension columns only)
 
 ws_server.js
-  → reads:  MAX/analysis_library.json (via Max dict chunks)
-  → reads:  EBYS_INFRA/downbeats.json
-  → reads:  EBYS_INFRA/genres.json
-  → reads:  MAX/ebys_index.json (cached)
-  → spawns: tsne_worker.js (Worker thread)
-  → writes: MAX/umap_coords.json
-  → writes: MAX/stem_ranges.json
-  → writes: MAX/ebys_index.json (reassembled from saveIdxChunk)
-  → outlet: idxchunk → slicer.js
-  → outlet: downbeatchunk → slicer.js
-  → WS broadcast → sdj-tui.js
+  → reads:   MAX/analysis_library.json
+  → reads:   EBYS_INFRA/downbeats.json + genres.json
+  → reads:   MAX/ebys_index.json  (cached, sent to slicer at boot)
+  → spawns:  tsne_worker.js  (stdin/stdout JSON)
+  → writes:  MAX/umap_coords.json
+  → writes:  MAX/stem_ranges.json
+  → writes:  MAX/ebys_index.json  (reassembled from saveIdxChunk)
+  → outlet:  downbeatchunk → slicer.js
+  → outlet:  idxchunk → slicer.js
+  → outlet:  libchunk → slicer.js      (on buildIndex)
+  → outlet:  genrechunk → slicer.js    (on buildIndex)
+  → WS:      broadcast to sdj-tui.js
 
 slicer.js
-  → reads:  idxchunk (ebys_index, from ws_server)
-  → reads:  downbeatchunk (downbeats, from ws_server)
-  → sends:  play commands → buffer_manager.js
-  → outlet: desc/seg/slices → ws_server → TUI
+  → receives: libchunk / genrechunk / downbeatchunk / idxchunk  (hardened streams)
+  → outlet 0: track slot startFrac endFrac stretchRatio segDurMs → buffer_manager.js
+  → outlet 1: desc / seg / stemTrack / slices → ws_server → TUI
+  → outlet 1: saveIdxChunk (sid, i, total, data) → ws_server → ebys_index.json
 
 buffer_manager.js
-  → reads:  src_N_* buffer~ (disk WAV files)
-  → triggers: fluid.bufcompose~ (src → ring copy)
-  → sends:  ringSlot/segDurMs/stretchRatio → slot_router.js
+  → reads:    src_N_* buffer~ (disk WAV)
+  → triggers: fluid.bufcompose~ (src → ring segment copy)
+  → sends:    track ringSlot segDurMs stretchRatio → slot_router.js
 
 slot_router.js
-  → sends:  set/seek → karma~ (playback)
-  → sends:  speed factor → karma~ right inlet (tape stretch)
-  → sends:  pitch ratio → pfft~/gizmo~ (independent pitch shift)
+  → sends:    "set ring_N_stem" + "seek 0" → karma~
+  → sends:    speedFactor → karma~ right inlet  (tempo axis)
+  → sends:    pitch ratio → pfft~/gizmo~         (pitch axis, independent)
 
 cricket.js
-  → reads:  ask <text> from Max
-  → POSTs:  Ollama /api/chat (localhost:11434)
-  → outlet: engine commands → route → slicer/ws_server params
+  → receives: ask <text> from Max
+  → POSTs:    Ollama /api/chat (localhost:11434)
+  → outlet 0: engine commands → Max route → parameter handlers
 
 sdj-tui.js
-  → WS: connects to ws_server :8080
-  → sends: buildIndex, setWeight, setMatchProb, start/stop, pitchShift, :bake
-  → receives: desc, seg, meter, state, slices, pipelineStage
+  → WS connects to ws_server :8080
+  → sends:    buildIndex, start, stop, setSegmentBars, setMatchProb,
+              setDirPref, setGlobalBPM, pitchShift, loop, :bake
+  → receives: desc, seg, meter, state, slices, pipelineStage,
+              stemsReady, analysisDone, umapDone
 ```
+
+### Chunk Stream Protocol
+
+All chunk sends from ws_server carry a `streamId` (global counter, increments per send):
+
+```
+label  streamId  chunkIndex  total  data
+```
+
+Receivers (`libchunk`, `genrechunk`, `downbeatchunk`, `idxchunk` in slicer.js; `saveIdxChunk` in ws_server.js) reset their buffer on stream ID change (with a warning log showing how many chunks were dropped) and skip duplicate chunk indexes. This prevents silent corruption when sends interleave — critical at 50+ tracks where `ebys_index.json` requires ~11,500 chunks.
+
+### Python Environments
+
+| Environment | Python | Has | Used for |
+|---|---|---|---|
+| `demucs_env/` | 3.14 | torch, demucs | Stem separation |
+| system / brew | 3.10–3.11 | essentia, madmom | Genre + downbeat analysis, import_library |
+
+madmom requires Python ≤ 3.11. essentia requires Python ≤ 3.12. These are incompatible with torch's Python 3.14 requirement, hence the split.
+
+### Pure Data Migration Note
+
+The JSON chain (analysis_library → ws_server chunks → slicer) exists solely because Max's JS engine has a 32KB file read limit and no SQLite bindings. On PD migration:
+- `stream.txt` polling → filesystem watch or OSC
+- 2KB chunk protocol → disappears (PD can load files natively)
+- `ws_server.js` t-SNE + chunk machinery → replaced by Python scripts
+- `ebys.db` becomes the primary data source — already populated by the existing Python pipeline
