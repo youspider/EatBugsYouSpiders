@@ -1,6 +1,6 @@
 # Tardigrada — TRDGA Token
 
-Tardigrada is the token powering the EBYS tipping economy. It runs on Solana. The long-term vision is a purpose-built chain, but for now Solana handles everything Tardigrada needs — fast, cheap, proven.
+Tardigrada is the token powering the EBYS tipping economy. It runs on Solana.
 
 The name is intentional. A tardigrade survives everything — extreme heat, radiation, the vacuum of space. Not because it can absorb damage, but because nothing can touch it. A blockchain works the same way: tamper with it and you destroy it. Its integrity is its indestructibility.
 
