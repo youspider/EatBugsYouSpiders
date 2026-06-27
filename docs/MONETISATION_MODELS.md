@@ -46,13 +46,17 @@ There is also a deeper analogy: the system itself behaves like proteins — slic
 
 ## Crypto Token
 
-The token is speculative by design. It gets released early — before the project is fully defined — and the market determines its value over time. That ambiguity is intentional.
+The token is speculative by design. It launches before the community is fully formed — and grows as the community does. Artists submitting tracks, listeners tipping mixes, DJs building sets from the library: the token reflects that network, not a promise.
 
-The strategy is a race: keep building faster than people establish what EBYS is worth. By the time the market prices it, the project has already moved. The token captures the bet on where it's going, not where it is.
+No artificial backing, no promises about utility. The value comes from what the community becomes — the scene around the radio, the artists in the library, the people who care enough to tip. The token is a stake in all of it at once, before any of it is fully legible.
 
-No artificial backing, no promises about utility. The value comes from what the project becomes — the radio, the hardware, the protein brand, the training loop, the community. The token is a stake in all of it at once, before any of it is fully legible.
+---
 
-The mechanism is simple: if development stops, holders can no longer sell for higher than they bought — they either hold and wait, or start selling for lower before the price drops too far. If development is consistent and visible, holders keep selling for more, new buyers come in, and the perceived value of the project rises. The quality and velocity of development is directly reflected in the token price. That's what speculation is — a continuous bet on momentum, and a real-time referendum on whether the project is alive. It works in both directions, and it creates its own pressure to keep moving.
+## Transparency
+
+Everything is public. Downloads, revenue, library size, listener counts, on-chain tipping activity — all visible to anyone. The token isn't a bet on a black box. Holders can watch the economy move in real time: how many artists are in the system, how many tips are flowing, how many tracks have been submitted. The blockchain handles the tipping side automatically — immutable and open by default. The rest — downloads, traffic, financials — is published openly by choice.
+
+This fits the rest of the project. The code is GPL. The economy is on-chain. The business numbers are public. Nothing is hidden.
 
 ---
 
