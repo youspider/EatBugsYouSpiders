@@ -34,7 +34,7 @@ A website and a continuous radio for the Montreal music scene.
 
 ```
 Clean track       → plays fully, no manipulation, 100% to artist if tipped
-Noisy transition  → glitchy stretch between two tracks, small EBYS cut if tipped
+Noisy transition  → glitchy stretch between two tracks.
 Original mix      → EBYS composes from the corpus, full split equation applies
 ```
 
