@@ -35,7 +35,7 @@ A website and a continuous radio for the Montreal music scene.
 ```
 Clean track       → plays fully, no manipulation, 100% to artist if tipped
 Noisy transition  → glitchy stretch between two tracks
-Original mix      → EBYS composes from the corpus, split equation applies, but oriented artists (▼)
+Original mix      → EBYS composes from the corpus, splits 60/40, EBYS/artists.
 
 ```
 
