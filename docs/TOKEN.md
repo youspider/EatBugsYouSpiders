@@ -1,53 +1,93 @@
-# Tardigrada — TRDGA Token
+# Cricket — CRKT Token
 
-Tardigrada is the token powering the EBYS tipping economy. It runs on Solana. The long-term vision is a purpose-built chain, but for now Solana handles everything Tardigrada needs — fast, cheap, proven.
+CRKT is a revenue share in the Cricket Protein Powder Company. It is not a traded token. It is not on any exchange. You cannot buy it anywhere.
 
-The name is intentional. A tardigrade survives everything — extreme heat, radiation, the vacuum of space, high entropy systems. It doesn't resist chaos. It endures it. A blockchain works the same way: tamper with it and you destroy it. Its integrity is its indestructibility.
+The only way to get CRKT is to earn it — through tips on an EBYS set or through the open tipping protocol. That's it. No open market. No buying in. No speculation.
 
----
-
-## What TRDGA Does
-
-- **Tips** — listeners tip mixes in TRDGA. The split happens automatically on-chain.
-- **Artist payments** — artists receive TRDGA or convert to stablecoin. Their choice, changeable anytime.
-- **Curator earnings** — the curator's share of every composite mix is paid in TRDGA.
-- **Escrow** — unclaimed earnings accumulate tied to an audio fingerprint, not a wallet. No fees, no expiry.
-- **Stakeholder ownership** — artists who hold TRDGA are invested in the network. The better it grows, the more their earnings are worth.
+The name is the same thing at every level. Cricket — the insect, the AI agent, the protein, the company, the token. All one thing.
 
 ---
 
-## The Token
+## How You Earn CRKT
 
-**Ticker:** TRDGA
-**Supply:** Fixed cap of 1 billion, minted gradually over ~20 years
-**Divisibility:** Infinite — tips are denominated in dollars, the system converts
-**Minting:** Miners earn newly minted TRDGA as rewards until the cap is hit, then earn transaction fees only
-**Bootstrap:** A small pre-mine launches the network
+Tips from listeners flow through the tipping protocol. Artists and DJs receive their share in dollars. Each recipient then chooses:
 
----
+```
+Receive dollars   → cash out immediately, no crypto involved
+Convert to CRKT   → become a powder company stakeholder
+```
 
-## What Makes TRDGA Different from Existing Music Tokens
-
-Platforms like Audius and Soundverse handle static ownership — song X belongs to artist Y, pay them when it streams.
-
-TRDGA handles **dynamic ownership**. When EBYS generates a mix from slices of 10 different tracks, recombined in real time, who owns that mix? The split is computed at the moment of the tip — a function of how many artists contributed, how much the curator's model altered the original material, and how complex the recombination was. The split isn't declared — it's calculated.
-
-No existing music token does this.
+Converting is opt-in. An artist who just wants to get paid gets paid in dollars. An artist who believes in the project converts to CRKT and starts earning from powder sales. A genuine choice with real trade-offs.
 
 ---
 
-## The Long-Term Vision
+## Two Tipping Contexts
 
-Solana can do everything TRDGA needs today. But it's someone else's infrastructure. The vision — if TRDGA grows large enough — is Tardigrada: a purpose-built chain where audio fingerprint-as-identity is a first-class primitive, the split algorithm is native to the chain, and governance is weighted toward artists rather than token holders.
+### EBYS Context — Full Split
+EBYS has full visibility into the mix: every track, every slice, every stem, the follow graph, the transformation level. When a listener tips an EBYS set, the split is calculated automatically and precisely. The tip flows to the DJ and every contributing artist proportionally — without the DJ doing anything.
 
-That's not today. Today is Solana. Tardigrada is what TRDGA becomes if it earns it.
+```
+Listener tips $5
+    ↓
+Split equation runs
+    ↓
+DJ receives curator share
+Artists receive their proportional share
+    ↓
+Each recipient chooses: dollars or CRKT
+```
+
+### External Context — DJ Only
+A DJ performing on Pioneer decks, at a club, on another platform. The protocol has no visibility into what's playing. The tip goes to the DJ. Full stop. The DJ earns CRKT if they choose to convert, but the artists in that set are invisible to the protocol.
+
+```
+Listener tips $5 at a club set
+    ↓
+DJ receives full tip
+    ↓
+DJ chooses: dollars or CRKT
+Artists: not visible to protocol, not included
+```
+
+This is honest about what the system can and can't see. It also makes EBYS genuinely valuable to artists — if you want your music to earn from tips even when you're not performing, your tracks need to be in an EBYS corpus.
 
 ---
 
-## Open Questions
+## What CRKT Does
 
-- What does the dispute resolution process actually look like in practice?
-- What is the halving schedule — how often does the minting reward get cut in half?
-- How large is the pre-mine, and who receives it?
-- What is the transaction fee structure?
-- What other projects could build on TRDGA beyond EBYS?
+Hold CRKT, earn from powder sales. Nothing more is required.
+
+```
+Powder sells
+    ↓
+EBYS deducts actual operating costs
+Remainder → 100% to distribution pool
+    ↓
+Each holder receives: (their CRKT / total supply) × distribution pool
+```
+
+Distribution is monthly, automatic, on-chain. It arrives. You don't claim it.
+
+---
+
+## Escrow
+
+Artists who haven't opted in yet still accumulate earnings. Both dollars and potential CRKT sit in escrow tied to their audio fingerprint — not a wallet, not a person, just the sound itself. When they claim, they choose: cash out in dollars, or convert to CRKT. Everything that accrued is waiting.
+
+No expiry. No fees. The money waits.
+
+---
+
+## EBYS's Position
+
+EBYS built the protocol and runs one instance of it. It does not hold a CRKT founding stake. It takes a fixed percentage of its own earnings and converts to CRKT like anyone else — as a participant, not as an operator with a privileged cut.
+
+EBYS's founding allocation comes from its own conversion choices, not from a pre-mine. It earns CRKT the same way a curator does — by running sets, by the community tipping those sets, by choosing to convert.
+
+---
+
+## The Open Protocol
+
+The tipping protocol is not exclusive to EBYS. It is open. Any platform, any DJ software, any live setup can implement it. EBYS is the first and most visible implementation — and the only one with full track-level split visibility. But the protocol belongs to anyone who wants to use it.
+
+CRKT earned anywhere the protocol runs is the same CRKT. It all earns from the same powder company. EBYS is infrastructure, not a platform. The difference matters — infrastructure you can leave and still keep what you built.
