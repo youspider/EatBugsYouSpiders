@@ -158,13 +158,22 @@ bass   = 20% + (20% × 0)     = 20.0%
 ---
 
 ### Level 4 — Collaborative
-Two or more EBYS units in dialogue through the LINK protocol. The structure is no longer one DJ's alone — it's a conversation between systems. Active LINK transmissions accepted between units during the set.
+Two or more EBYS units in dialogue through the LINK protocol. The structure is no longer one DJ's alone — it's a conversation between systems.
+
+The level is evaluated on the **combined output** of both decks — not per DJ. The system reads the mix as a whole. If one DJ is varying segment lengths, the set reaches Level 3 regardless of what the other is doing. The level is the ceiling of what's happening across both decks together.
+
+The curator pool follows the same level rules as a solo set:
 
 ```
-curator pool: 90% / artists: 10%
+Level 0 collaborative: curator 40% / artists 60%
+Level 1 collaborative: curator 45% / artists 55%
+Level 2 collaborative: curator 65% / artists 35%
+Level 3 collaborative: curator 80% / artists 20%
 ```
 
-The 90% curator pool is split between DJs by the crowd — through the ▲▼ tipping mechanic.
+LINK activity doesn't affect the level — it only affects how the curator pool is divided between the DJs.
+
+The curator pool is split between DJs by the crowd — through the ▲▼= tipping mechanic.
 
 **▲▼= — Listener-Side Split Control**
 
