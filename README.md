@@ -8,7 +8,6 @@ Licence : AGPL-3.0
 
 ## Documentation
 
-- [`OVERVIEW.md`](./OVERVIEW.md) — overview.
 - [`CRICKET.md`](./CRICKET.md) — documentation principale : paramètres, commandes, descripteurs, comportement du système.
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — conceptual overview: the three phases, how data flows, why things work the way they do.
 - [`ARCHITECTURE_REF.md`](./ARCHITECTURE_REF.md) — file-by-file reference of every script, data file, and Max object in the system.
